@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GPX Incline Adjuster</title>
+<style>
+  :root {
+    --bg: #1a1d23;
+    --panel: #23272f;
+    --panel-2: #2b3038;
+    --border: #3a4048;
+    --text: #eef1f0;
+    --muted: #9aa1ab;
+    --accent: #e8974a;
+    --accent-text: #1a1d23;
+    --safe: #5fb98b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.5;
+  }
+  .wrap {
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 48px 20px 80px;
+  }
+  h1 {
+    font-size: 1.6rem;
+    font-weight: 600;
+    margin: 0 0 6px;
+  }
+  .lede {
+    color: var(--muted);
+    margin: 0 0 32px;
+    max-width: 52ch;
+  }
+  .drop {
+    border: 1.5px dashed var(--border);
+    background: var(--panel);
+    padding: 36px 24px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color .15s ease, background .15s ease;
+  }
+  .drop:hover, .drop.drag {
+    border-color: var(--accent);
+    background: var(--panel-2);
+  }
+  .drop p { margin: 0; }
+  .drop .main { font-size: 1.02rem; }
+  .drop .sub { color: var(--muted); font-size: .88rem; margin-top: 6px; }
+  .filename {
+    margin-top: 14px;
+    font-size: .9rem;
+    color: var(--safe);
+    word-break: break-all;
+  }
+  input[type=file] { display: none; }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    padding: 20px;
+    margin-top: 20px;
+  }
+  .panel h2 {
+    font-size: .95rem;
+    font-weight: 600;
+    margin: 0 0 16px;
+  }
+  .fields {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+  }
+  .fields .full { grid-column: 1 / -1; }
+  .hint { color: var(--muted); font-size: .78rem; margin-top: 5px; }
+  label { display: block; font-size: .82rem; color: var(--muted); margin-bottom: 6px; }
+  input[type=number] {
+    width: 100%;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 10px;
+    font-size: .95rem;
+  }
+  input[type=number]:focus, .drop:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  button.primary {
+    display: block;
+    width: 100%;
+    margin-top: 20px;
+    padding: 13px;
+    background: var(--accent);
+    color: var(--accent-text);
+    border: none;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button.primary:disabled { opacity: .4; cursor: not-allowed; }
+  button.primary:not(:disabled):hover { filter: brightness(1.08); }
+
+  .error {
+    color: #e07a7a;
+    font-size: .9rem;
+    margin-top: 14px;
+  }
+
+  #results { display: none; }
+  .stat-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    margin-bottom: 6px;
+  }
+  .stat { padding: 4px 0; }
+  .stat .num { font-size: 1.6rem; font-weight: 600; }
+  .stat .label { color: var(--muted); font-size: .82rem; }
+
+  a.download {
+    display: block;
+    width: 100%;
+    text-align: center;
+    margin-top: 18px;
+    padding: 13px;
+    background: var(--safe);
+    color: #12261c;
+    font-weight: 600;
+    text-decoration: none;
+    font-size: 1rem;
+  }
+  a.download:hover { filter: brightness(1.08); }
+
+  .split-list {
+    max-height: 340px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    margin-top: 12px;
+  }
+  .split-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .split-row:last-child { border-bottom: none; }
+  .split-row .info { font-size: .85rem; }
+  .split-row .info .range { font-weight: 600; }
+  .split-row .info .meta { color: var(--muted); }
+  a.download-small {
+    flex-shrink: 0;
+    padding: 7px 14px;
+    background: var(--safe);
+    color: #12261c;
+    font-weight: 600;
+    text-decoration: none;
+    font-size: .83rem;
+    white-space: nowrap;
+  }
+  a.download-small:hover { filter: brightness(1.08); }
+
+  footer {
+    margin-top: 40px;
+    color: var(--muted);
+    font-size: .8rem;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>GPX Incline Adjuster</h1>
+  <p class="lede">Flattens descents to 0%, caps climbs at your treadmill's max, and holds each incline change to once every fixed distance. Optionally splits a long route into standalone files of a set mileage, one per treadmill session.</p>
+
+  <div class="drop" id="drop" tabindex="0" role="button" aria-label="Choose a GPX file">
+    <p class="main">Drop a GPX file here, or click to choose one</p>
+    <p class="sub">Nothing leaves your browser — the file is processed locally.</p>
+    <div class="filename" id="filename"></div>
+    <input type="file" id="fileInput" accept=".gpx">
+  </div>
+
+  <div class="panel">
+    <h2>Settings</h2>
+    <div class="fields">
+      <div>
+        <label for="segment">Segment length (m)</label>
+        <input type="number" id="segment" value="20" min="1" step="1">
+      </div>
+      <div>
+        <label for="minIncline">Min incline (%)</label>
+        <input type="number" id="minIncline" value="0" step="0.5">
+      </div>
+      <div>
+        <label for="maxIncline">Max incline (%)</label>
+        <input type="number" id="maxIncline" value="15" step="0.5">
+      </div>
+      <div class="full">
+        <label for="splitMiles">Split into files every (mi, 0 = off)</label>
+        <input type="number" id="splitMiles" value="0" min="0" step="0.5">
+        <div class="hint">Each file is a complete, standalone GPX — useful for loading a long route one session at a time.</div>
+      </div>
+    </div>
+  </div>
+
+  <button class="primary" id="processBtn" disabled>Process file</button>
+  <div class="error" id="error" hidden></div>
+
+  <div class="panel" id="results">
+    <h2>Result</h2>
+    <div class="stat-row">
+      <div class="stat"><div class="num" id="statChanges">–</div><div class="label">incline changes</div></div>
+      <div class="stat"><div class="num" id="statDistance">–</div><div class="label">total distance</div></div>
+      <div class="stat"><div class="num" id="statPoints">–</div><div class="label">input track points</div></div>
+      <div class="stat"><div class="num" id="statRange">–</div><div class="label">incline range in output</div></div>
+    </div>
+    <a class="download" id="downloadLink">Download adjusted GPX</a>
+
+    <div id="splitSection" hidden>
+      <h2 style="margin-top:22px;">Split files</h2>
+      <div class="split-list" id="splitList"></div>
+    </div>
+  </div>
+
+  <footer>Runs entirely in this page — no upload, no install, no account.</footer>
+</div>
+
+<script>
+// ---------- core algorithm (mirrors the desktop Python/bash version) ----------
+
+function haversine(lat1, lon1, lat2, lon2) {
+  const R = 6371000.0;
+  const phi1 = lat1 * Math.PI / 180, phi2 = lat2 * Math.PI / 180;
+  const dphi = (lat2 - lat1) * Math.PI / 180;
+  const dlambda = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dphi / 2) ** 2 + Math.cos(phi1) * Math.cos(phi2) * Math.sin(dlambda / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+}
+
+function parseGpxTime(text) {
+  if (!text) return null;
+  const d = new Date(text.trim());
+  return isNaN(d.getTime()) ? null : d;
+}
+
+function formatGpxTime(d) {
+  return d.toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+function loadPoints(xmlText) {
+  const doc = new DOMParser().parseFromString(xmlText, 'application/xml');
+  if (doc.getElementsByTagName('parsererror').length) {
+    throw new Error('This file is not valid XML/GPX.');
+  }
+  const trkpts = doc.getElementsByTagName('trkpt');
+  if (trkpts.length < 2) {
+    throw new Error('GPX file needs at least 2 track points (<trkpt>).');
+  }
+  const points = [];
+  for (const el of trkpts) {
+    const lat = parseFloat(el.getAttribute('lat'));
+    const lon = parseFloat(el.getAttribute('lon'));
+    const eleEl = el.getElementsByTagName('ele')[0];
+    const timeEl = el.getElementsByTagName('time')[0];
+    const ele = eleEl ? parseFloat(eleEl.textContent) : 0.0;
+    const time = timeEl ? parseGpxTime(timeEl.textContent) : null;
+    points.push({ lat, lon, ele: isNaN(ele) ? 0.0 : ele, time });
+  }
+  return points;
+}
+
+function buildCumulativeDistance(points) {
+  const cum = [0];
+  for (let i = 1; i < points.length; i++) {
+    cum.push(cum[cum.length - 1] + haversine(points[i - 1].lat, points[i - 1].lon, points[i].lat, points[i].lon));
+  }
+  return cum;
+}
+
+function interpolateAt(points, cum, targetDist) {
+  if (targetDist <= 0) { const p = points[0]; return { lat: p.lat, lon: p.lon, ele: p.ele, time: p.time }; }
+  if (targetDist >= cum[cum.length - 1]) { const p = points[points.length - 1]; return { lat: p.lat, lon: p.lon, ele: p.ele, time: p.time }; }
+  let lo = 0, hi = cum.length - 1;
+  while (lo < hi - 1) {
+    const mid = (lo + hi) >> 1;
+    if (cum[mid] <= targetDist) lo = mid; else hi = mid;
+  }
+  const i = lo, j = lo + 1;
+  const segLen = cum[j] - cum[i];
+  const t = segLen <= 0 ? 0 : (targetDist - cum[i]) / segLen;
+  const p0 = points[i], p1 = points[j];
+  return {
+    lat: p0.lat + t * (p1.lat - p0.lat),
+    lon: p0.lon + t * (p1.lon - p0.lon),
+    ele: p0.ele + t * (p1.ele - p0.ele),
+    time: (p0.time && p1.time) ? new Date(p0.time.getTime() + t * (p1.time.getTime() - p0.time.getTime())) : null,
+  };
+}
+
+function clipGrade(gradePct, minIncline, maxIncline) {
+  if (gradePct < minIncline) return minIncline;
+  if (gradePct > maxIncline) return maxIncline;
+  return gradePct;
+}
+
+function process(points, segmentLen, minIncline, maxIncline) {
+  const cum = buildCumulativeDistance(points);
+  const total = cum[cum.length - 1];
+  if (total <= 0) throw new Error('Track has zero horizontal distance.');
+
+  const numFull = Math.floor(total / segmentLen);
+  let breakpoints;
+  if (numFull === 0) {
+    breakpoints = [0, total];
+  } else {
+    breakpoints = Array.from({ length: numFull }, (_, i) => i * segmentLen);
+    breakpoints.push(total);
+  }
+
+  const raw = breakpoints.map(d => interpolateAt(points, cum, d));
+  const outPoints = [{ lat: raw[0].lat, lon: raw[0].lon, ele: raw[0].ele, time: raw[0].time }];
+  let newEle = raw[0].ele;
+  const grades = [];
+
+  for (let j = 1; j < breakpoints.length; j++) {
+    const segLen = breakpoints[j] - breakpoints[j - 1];
+    if (segLen <= 0) continue;
+    const rawDelta = raw[j].ele - raw[j - 1].ele;
+    const gradePct = (rawDelta / segLen) * 100;
+    const clipped = clipGrade(gradePct, minIncline, maxIncline);
+    grades.push(clipped);
+    newEle += (clipped / 100) * segLen;
+    outPoints.push({ lat: raw[j].lat, lon: raw[j].lon, ele: newEle, time: raw[j].time });
+  }
+
+  return { outPoints, grades, total, breakpoints };
+}
+
+function splitIntoParts(outPoints, breakpoints, total, splitMiles) {
+  const splitLenM = splitMiles * 1609.344;
+  const numParts = Math.max(1, Math.ceil(total / splitLenM));
+  const parts = [];
+
+  for (let k = 0; k < numParts; k++) {
+    const startDist = k * splitLenM;
+    const endDist = Math.min((k + 1) * splitLenM, total);
+
+    const slice = [{ point: interpolateAt(outPoints, breakpoints, startDist), dist: startDist }];
+    for (let i = 0; i < breakpoints.length; i++) {
+      if (breakpoints[i] > startDist + 1e-6 && breakpoints[i] < endDist - 1e-6) {
+        slice.push({ point: outPoints[i], dist: breakpoints[i] });
+      }
+    }
+    slice.push({ point: interpolateAt(outPoints, breakpoints, endDist), dist: endDist });
+
+    const grades = [];
+    for (let i = 1; i < slice.length; i++) {
+      const d = slice[i].dist - slice[i - 1].dist;
+      if (d > 0) grades.push(((slice[i].point.ele - slice[i - 1].point.ele) / d) * 100);
+    }
+
+    parts.push({
+      index: k + 1,
+      total: numParts,
+      startMiles: startDist / 1609.344,
+      endMiles: endDist / 1609.344,
+      points: slice.map(s => s.point),
+      grades,
+    });
+  }
+  return parts;
+}
+
+function buildGpxXml(outPoints, trackName) {
+  const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  let xml = '<?xml version="1.0" encoding="UTF-8"?>\n';
+  xml += '<gpx version="1.1" creator="gpx-incline-adjuster-web" xmlns="http://www.topografix.com/GPX/1/1">\n';
+  xml += `  <trk>\n    <name>${esc(trackName)}</name>\n    <trkseg>\n`;
+  for (const p of outPoints) {
+    xml += `      <trkpt lat="${p.lat.toFixed(7)}" lon="${p.lon.toFixed(7)}">\n`;
+    xml += `        <ele>${p.ele.toFixed(2)}</ele>\n`;
+    if (p.time) xml += `        <time>${formatGpxTime(p.time)}</time>\n`;
+    xml += `      </trkpt>\n`;
+  }
+  xml += '    </trkseg>\n  </trk>\n</gpx>\n';
+  return xml;
+}
+
+// ---------- UI wiring ----------
+
+const drop = document.getElementById('drop');
+const fileInput = document.getElementById('fileInput');
+const filenameEl = document.getElementById('filename');
+const processBtn = document.getElementById('processBtn');
+const errorEl = document.getElementById('error');
+const resultsEl = document.getElementById('results');
+const downloadLink = document.getElementById('downloadLink');
+const splitSection = document.getElementById('splitSection');
+const splitList = document.getElementById('splitList');
+
+let currentFile = null;
+let activeUrls = [];
+
+function revokeActiveUrls() {
+  activeUrls.forEach(u => URL.revokeObjectURL(u));
+  activeUrls = [];
+}
+
+function showError(msg) {
+  errorEl.textContent = msg;
+  errorEl.hidden = false;
+}
+function clearError() { errorEl.hidden = true; }
+
+function setFile(file) {
+  clearError();
+  resultsEl.style.display = 'none';
+  if (!file) return;
+  currentFile = file;
+  filenameEl.textContent = file.name;
+  processBtn.disabled = false;
+}
+
+drop.addEventListener('click', () => fileInput.click());
+drop.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') fileInput.click(); });
+fileInput.addEventListener('change', () => setFile(fileInput.files[0]));
+
+['dragover', 'dragenter'].forEach(evt =>
+  drop.addEventListener(evt, e => { e.preventDefault(); drop.classList.add('drag'); }));
+['dragleave', 'drop'].forEach(evt =>
+  drop.addEventListener(evt, e => { e.preventDefault(); drop.classList.remove('drag'); }));
+drop.addEventListener('drop', e => {
+  const file = e.dataTransfer.files[0];
+  if (file) setFile(file);
+});
+
+processBtn.addEventListener('click', () => {
+  if (!currentFile) return;
+  clearError();
+  const segment = parseFloat(document.getElementById('segment').value) || 20;
+  const minIncline = parseFloat(document.getElementById('minIncline').value) || 0;
+  const maxIncline = parseFloat(document.getElementById('maxIncline').value) || 15;
+  const splitMiles = parseFloat(document.getElementById('splitMiles').value) || 0;
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      revokeActiveUrls();
+      const points = loadPoints(reader.result);
+      const { outPoints, grades, total, breakpoints } = process(points, segment, minIncline, maxIncline);
+      const baseName = currentFile.name.replace(/\.gpx$/i, '');
+      const xml = buildGpxXml(outPoints, 'Incline-adjusted route');
+
+      document.getElementById('statChanges').textContent = grades.length;
+      document.getElementById('statDistance').textContent = (total / 1609.344).toFixed(2) + ' mi';
+      document.getElementById('statPoints').textContent = points.length;
+      document.getElementById('statRange').textContent = grades.length
+        ? Math.min(...grades).toFixed(1) + '% – ' + Math.max(...grades).toFixed(1) + '%'
+        : '–';
+
+      const blob = new Blob([xml], { type: 'application/gpx+xml' });
+      const url = URL.createObjectURL(blob);
+      activeUrls.push(url);
+      const outName = baseName + '_incline.gpx';
+      downloadLink.href = url;
+      downloadLink.download = outName;
+      downloadLink.textContent = 'Download ' + outName;
+
+      if (splitMiles > 0) {
+        const numPartsPreview = Math.ceil(total / (splitMiles * 1609.344));
+        if (numPartsPreview > 500) {
+          throw new Error(`That split length would create ${numPartsPreview} files — pick a larger value.`);
+        }
+        const parts = splitIntoParts(outPoints, breakpoints, total, splitMiles);
+        splitList.innerHTML = '';
+        for (const part of parts) {
+          const partXml = buildGpxXml(part.points, `Incline-adjusted route – Part ${part.index} of ${part.total}`);
+          const partBlob = new Blob([partXml], { type: 'application/gpx+xml' });
+          const partUrl = URL.createObjectURL(partBlob);
+          activeUrls.push(partUrl);
+          const partName = `${baseName}_incline_part${part.index}of${part.total}.gpx`;
+          const range = `${part.startMiles.toFixed(1)}–${part.endMiles.toFixed(1)} mi`;
+          const inclineRange = part.grades.length
+            ? `${Math.min(...part.grades).toFixed(1)}%–${Math.max(...part.grades).toFixed(1)}%`
+            : '–';
+
+          const row = document.createElement('div');
+          row.className = 'split-row';
+          row.innerHTML = `
+            <div class="info">
+              <div class="range">Part ${part.index} of ${part.total} — ${range}</div>
+              <div class="meta">${inclineRange} incline</div>
+            </div>
+          `;
+          const a = document.createElement('a');
+          a.className = 'download-small';
+          a.href = partUrl;
+          a.download = partName;
+          a.textContent = 'Download';
+          row.appendChild(a);
+          splitList.appendChild(row);
+        }
+        splitSection.hidden = false;
+      } else {
+        splitSection.hidden = true;
+      }
+
+      resultsEl.style.display = 'block';
+    } catch (err) {
+      showError(err.message || String(err));
+    }
+  };
+  reader.onerror = () => showError('Could not read that file.');
+  reader.readAsText(currentFile);
+});
+</script>
+</body>
+</html>
