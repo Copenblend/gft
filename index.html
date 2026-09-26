@@ -37,7 +37,7 @@
   .lede {
     color: var(--muted);
     margin: 0 0 32px;
-    max-width: 52ch;
+    max-width: 56ch;
   }
   .drop {
     border: 1.5px dashed var(--border);
@@ -75,7 +75,7 @@
   }
   .fields {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(2, 1fr);
     gap: 14px;
   }
   .fields .full { grid-column: 1 / -1; }
@@ -120,7 +120,7 @@
     margin-bottom: 6px;
   }
   .stat { padding: 4px 0; }
-  .stat .num { font-size: 1.6rem; font-weight: 600; }
+  .stat .num { font-size: 1.5rem; font-weight: 600; }
   .stat .label { color: var(--muted); font-size: .82rem; }
 
   a.download {
@@ -136,6 +136,7 @@
     font-size: 1rem;
   }
   a.download:hover { filter: brightness(1.08); }
+  a.download.zip { background: var(--accent); color: var(--accent-text); }
 
   .split-list {
     max-height: 340px;
@@ -177,7 +178,7 @@
 <body>
 <div class="wrap">
   <h1>GPX Incline Adjuster</h1>
-  <p class="lede">Flattens descents to 0%, caps climbs at your treadmill's max, and holds each incline change to once every fixed distance. Optionally splits a long route into standalone files of a set mileage, one per treadmill session.</p>
+  <p class="lede">Flattens descents to 0%, caps climbs at your treadmill's max, and holds each whole-percent incline change to a minimum distance — so the treadmill is never asked to change incline faster than once every few seconds, no matter how choppy the source elevation data is. Optionally splits a long route into standalone files of a set mileage, one per treadmill session.</p>
 
   <div class="drop" id="drop" tabindex="0" role="button" aria-label="Choose a GPX file">
     <p class="main">Drop a GPX file here, or click to choose one</p>
@@ -190,16 +191,20 @@
     <h2>Settings</h2>
     <div class="fields">
       <div>
-        <label for="segment">Segment length (m)</label>
-        <input type="number" id="segment" value="20" min="1" step="1">
+        <label for="maxSpeed">Max treadmill speed (mph)</label>
+        <input type="number" id="maxSpeed" value="12" min="0.5" step="0.5">
+      </div>
+      <div>
+        <label for="minSeconds">Min seconds between changes</label>
+        <input type="number" id="minSeconds" value="5" min="0.5" step="0.5">
       </div>
       <div>
         <label for="minIncline">Min incline (%)</label>
-        <input type="number" id="minIncline" value="0" step="0.5">
+        <input type="number" id="minIncline" value="0" step="1">
       </div>
       <div>
         <label for="maxIncline">Max incline (%)</label>
-        <input type="number" id="maxIncline" value="15" step="0.5">
+        <input type="number" id="maxIncline" value="15" step="1">
       </div>
       <div class="full">
         <label for="splitMiles">Split into files every (mi, 0 = off)</label>
@@ -215,7 +220,7 @@
   <div class="panel" id="results">
     <h2>Result</h2>
     <div class="stat-row">
-      <div class="stat"><div class="num" id="statChanges">–</div><div class="label">incline changes</div></div>
+      <div class="stat"><div class="num" id="statRate">–</div><div class="label">guaranteed max rate</div></div>
       <div class="stat"><div class="num" id="statDistance">–</div><div class="label">total distance</div></div>
       <div class="stat"><div class="num" id="statPoints">–</div><div class="label">input track points</div></div>
       <div class="stat"><div class="num" id="statRange">–</div><div class="label">incline range in output</div></div>
@@ -224,6 +229,7 @@
 
     <div id="splitSection" hidden>
       <h2 style="margin-top:22px;">Split files</h2>
+      <a class="download zip" id="downloadZipLink">Download all parts as ZIP</a>
       <div class="split-list" id="splitList"></div>
     </div>
   </div>
@@ -232,7 +238,9 @@
 </div>
 
 <script>
-// ---------- core algorithm (mirrors the desktop Python/bash version) ----------
+// ============================================================
+// Geometry / GPX helpers
+// ============================================================
 
 function haversine(lat1, lon1, lat2, lon2) {
   const R = 6371000.0;
@@ -248,7 +256,6 @@ function parseGpxTime(text) {
   const d = new Date(text.trim());
   return isNaN(d.getTime()) ? null : d;
 }
-
 function formatGpxTime(d) {
   return d.toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
@@ -309,37 +316,85 @@ function clipGrade(gradePct, minIncline, maxIncline) {
   return gradePct;
 }
 
-function process(points, segmentLen, minIncline, maxIncline) {
+// Centered moving average over a fixed number of segments (O(n) via prefix sums).
+// Smooths out GPS/elevation noise before rate-limiting so the output doesn't
+// hover right at a whole-percent boundary and flicker back and forth across it.
+function smoothTargets(segTarget, windowSegments) {
+  const n = segTarget.length;
+  const half = Math.floor(windowSegments / 2);
+  const prefix = new Array(n + 1).fill(0);
+  for (let i = 0; i < n; i++) prefix[i + 1] = prefix[i] + segTarget[i];
+  const smoothed = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const lo = Math.max(0, i - half);
+    const hi = Math.min(n - 1, i + half);
+    smoothed[i] = (prefix[hi + 1] - prefix[lo]) / (hi - lo + 1);
+  }
+  return smoothed;
+}
+
+// ============================================================
+// Core algorithm: whole-percent incline steps, each held for a
+// minimum real-world distance (metersPerPercent), so a treadmill
+// reacting to whole-percent changes can never be asked to change
+// more often than once every metersPerPercent of travel.
+// ============================================================
+function buildInclineProfile(points, resampleStep, metersPerPercent, minIncline, maxIncline, smoothWindowMeters, stepSize) {
   const cum = buildCumulativeDistance(points);
   const total = cum[cum.length - 1];
   if (total <= 0) throw new Error('Track has zero horizontal distance.');
 
-  const numFull = Math.floor(total / segmentLen);
+  const numFull = Math.floor(total / resampleStep);
   let breakpoints;
   if (numFull === 0) {
     breakpoints = [0, total];
   } else {
-    breakpoints = Array.from({ length: numFull }, (_, i) => i * segmentLen);
+    breakpoints = Array.from({ length: numFull }, (_, i) => i * resampleStep);
     breakpoints.push(total);
   }
 
   const raw = breakpoints.map(d => interpolateAt(points, cum, d));
-  const outPoints = [{ lat: raw[0].lat, lon: raw[0].lon, ele: raw[0].ele, time: raw[0].time }];
-  let newEle = raw[0].ele;
-  const grades = [];
 
+  // Target grade for each sub-segment, clipped to the allowed range.
+  let segTarget = [];
   for (let j = 1; j < breakpoints.length; j++) {
     const segLen = breakpoints[j] - breakpoints[j - 1];
-    if (segLen <= 0) continue;
     const rawDelta = raw[j].ele - raw[j - 1].ele;
-    const gradePct = (rawDelta / segLen) * 100;
-    const clipped = clipGrade(gradePct, minIncline, maxIncline);
-    grades.push(clipped);
-    newEle += (clipped / 100) * segLen;
-    outPoints.push({ lat: raw[j].lat, lon: raw[j].lon, ele: newEle, time: raw[j].time });
+    const gradePct = segLen > 0 ? (rawDelta / segLen) * 100 : 0;
+    segTarget.push(clipGrade(gradePct, minIncline, maxIncline));
   }
 
-  return { outPoints, grades, total, breakpoints };
+  const windowSegments = Math.max(1, Math.round(smoothWindowMeters / resampleStep));
+  segTarget = smoothTargets(segTarget, windowSegments).map(v => clipGrade(v, minIncline, maxIncline));
+
+  const minLevel = Math.round(minIncline / stepSize);
+  const maxLevel = Math.round(maxIncline / stepSize);
+
+  let currentLevel = Math.min(maxLevel, Math.max(minLevel, Math.round(segTarget[0] / stepSize)));
+  let distSinceChange = 0; // the dwell restriction applies from the very first potential change too
+  const commandedLevel = [currentLevel];
+
+  for (let k = 1; k < segTarget.length; k++) {
+    const segLen = breakpoints[k + 1] - breakpoints[k];
+    distSinceChange += segLen;
+    const targetLevel = Math.min(maxLevel, Math.max(minLevel, Math.round(segTarget[k] / stepSize)));
+    if (distSinceChange >= metersPerPercent && targetLevel !== currentLevel) {
+      currentLevel += (targetLevel > currentLevel ? 1 : -1);
+      distSinceChange = 0;
+    }
+    commandedLevel.push(currentLevel);
+  }
+  const commanded = commandedLevel.map(l => l * stepSize);
+
+  const outPoints = [{ lat: raw[0].lat, lon: raw[0].lon, ele: raw[0].ele, time: raw[0].time }];
+  let ele = raw[0].ele;
+  for (let k = 0; k < commanded.length; k++) {
+    const segLen = breakpoints[k + 1] - breakpoints[k];
+    ele += (commanded[k] / 100) * segLen;
+    outPoints.push({ lat: raw[k + 1].lat, lon: raw[k + 1].lon, ele, time: raw[k + 1].time });
+  }
+
+  return { outPoints, breakpoints, total, commanded };
 }
 
 function splitIntoParts(outPoints, breakpoints, total, splitMiles) {
@@ -392,8 +447,82 @@ function buildGpxXml(outPoints, trackName) {
   return xml;
 }
 
-// ---------- UI wiring ----------
+// ============================================================
+// Minimal dependency-free ZIP writer (stored/uncompressed entries)
+// ============================================================
+function makeCrcTable() {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    table[n] = c >>> 0;
+  }
+  return table;
+}
+const CRC_TABLE = makeCrcTable();
+function crc32(bytes) {
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) crc = CRC_TABLE[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+function u16(n) { return new Uint8Array([n & 0xFF, (n >>> 8) & 0xFF]); }
+function u32(n) { return new Uint8Array([n & 0xFF, (n >>> 8) & 0xFF, (n >>> 16) & 0xFF, (n >>> 24) & 0xFF]); }
+function dosDateTime(date) {
+  const time = ((date.getHours() & 0x1F) << 11) | ((date.getMinutes() & 0x3F) << 5) | ((date.getSeconds() >> 1) & 0x1F);
+  const dt = (((date.getFullYear() - 1980) & 0x7F) << 9) | (((date.getMonth() + 1) & 0xF) << 5) | (date.getDate() & 0x1F);
+  return { time, date: dt };
+}
+function buildZipBlob(files) {
+  const encoder = new TextEncoder();
+  const { time: dosTime, date: dosDate } = dosDateTime(new Date());
+  const entries = files.map(f => ({
+    nameBytes: encoder.encode(f.name),
+    data: f.data,
+    crc: crc32(f.data),
+    size: f.data.length,
+  }));
 
+  const localParts = [];
+  const offsets = [];
+  let offset = 0;
+  for (const e of entries) {
+    offsets.push(offset);
+    const pieces = [
+      u32(0x04034b50), u16(20), u16(0x0800), u16(0),
+      u16(dosTime), u16(dosDate),
+      u32(e.crc), u32(e.size), u32(e.size),
+      u16(e.nameBytes.length), u16(0),
+      e.nameBytes, e.data,
+    ];
+    for (const p of pieces) { localParts.push(p); offset += p.length; }
+  }
+
+  const centralParts = [];
+  let centralSize = 0;
+  entries.forEach((e, i) => {
+    const pieces = [
+      u32(0x02014b50), u16(20), u16(20), u16(0x0800), u16(0),
+      u16(dosTime), u16(dosDate),
+      u32(e.crc), u32(e.size), u32(e.size),
+      u16(e.nameBytes.length), u16(0), u16(0), u16(0), u16(0), u32(0),
+      u32(offsets[i]),
+      e.nameBytes,
+    ];
+    for (const p of pieces) { centralParts.push(p); centralSize += p.length; }
+  });
+
+  const eocd = [
+    u32(0x06054b50), u16(0), u16(0),
+    u16(entries.length), u16(entries.length),
+    u32(centralSize), u32(offset), u16(0),
+  ];
+
+  return new Blob([...localParts, ...centralParts, ...eocd], { type: 'application/zip' });
+}
+
+// ============================================================
+// UI wiring
+// ============================================================
 const drop = document.getElementById('drop');
 const fileInput = document.getElementById('fileInput');
 const filenameEl = document.getElementById('filename');
@@ -401,21 +530,15 @@ const processBtn = document.getElementById('processBtn');
 const errorEl = document.getElementById('error');
 const resultsEl = document.getElementById('results');
 const downloadLink = document.getElementById('downloadLink');
+const downloadZipLink = document.getElementById('downloadZipLink');
 const splitSection = document.getElementById('splitSection');
 const splitList = document.getElementById('splitList');
 
 let currentFile = null;
 let activeUrls = [];
+function revokeActiveUrls() { activeUrls.forEach(u => URL.revokeObjectURL(u)); activeUrls = []; }
 
-function revokeActiveUrls() {
-  activeUrls.forEach(u => URL.revokeObjectURL(u));
-  activeUrls = [];
-}
-
-function showError(msg) {
-  errorEl.textContent = msg;
-  errorEl.hidden = false;
-}
+function showError(msg) { errorEl.textContent = msg; errorEl.hidden = false; }
 function clearError() { errorEl.hidden = true; }
 
 function setFile(file) {
@@ -430,38 +553,46 @@ function setFile(file) {
 drop.addEventListener('click', () => fileInput.click());
 drop.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') fileInput.click(); });
 fileInput.addEventListener('change', () => setFile(fileInput.files[0]));
-
-['dragover', 'dragenter'].forEach(evt =>
-  drop.addEventListener(evt, e => { e.preventDefault(); drop.classList.add('drag'); }));
-['dragleave', 'drop'].forEach(evt =>
-  drop.addEventListener(evt, e => { e.preventDefault(); drop.classList.remove('drag'); }));
-drop.addEventListener('drop', e => {
-  const file = e.dataTransfer.files[0];
-  if (file) setFile(file);
-});
+['dragover', 'dragenter'].forEach(evt => drop.addEventListener(evt, e => { e.preventDefault(); drop.classList.add('drag'); }));
+['dragleave', 'drop'].forEach(evt => drop.addEventListener(evt, e => { e.preventDefault(); drop.classList.remove('drag'); }));
+drop.addEventListener('drop', e => { const file = e.dataTransfer.files[0]; if (file) setFile(file); });
 
 processBtn.addEventListener('click', () => {
   if (!currentFile) return;
   clearError();
-  const segment = parseFloat(document.getElementById('segment').value) || 20;
+
+  const maxSpeedMph = parseFloat(document.getElementById('maxSpeed').value) || 12;
+  const minSeconds = parseFloat(document.getElementById('minSeconds').value) || 5;
   const minIncline = parseFloat(document.getElementById('minIncline').value) || 0;
   const maxIncline = parseFloat(document.getElementById('maxIncline').value) || 15;
   const splitMiles = parseFloat(document.getElementById('splitMiles').value) || 0;
+
+  if (maxSpeedMph <= 0 || minSeconds <= 0) {
+    showError('Max speed and min seconds must both be positive numbers.');
+    return;
+  }
+
+  const maxSpeedMps = maxSpeedMph * 1609.344 / 3600;
+  const metersPerPercent = minSeconds * maxSpeedMps;
+  const resampleStep = Math.min(10, Math.max(2, metersPerPercent / 4));
+  const smoothWindowMeters = metersPerPercent * 2;
+  const stepSize = 1; // whole-percent steps, matching the treadmill's own increment
 
   const reader = new FileReader();
   reader.onload = () => {
     try {
       revokeActiveUrls();
       const points = loadPoints(reader.result);
-      const { outPoints, grades, total, breakpoints } = process(points, segment, minIncline, maxIncline);
+      const { outPoints, breakpoints, total, commanded } =
+        buildInclineProfile(points, resampleStep, metersPerPercent, minIncline, maxIncline, smoothWindowMeters, stepSize);
       const baseName = currentFile.name.replace(/\.gpx$/i, '');
       const xml = buildGpxXml(outPoints, 'Incline-adjusted route');
 
-      document.getElementById('statChanges').textContent = grades.length;
+      document.getElementById('statRate').textContent = '1% / ' + metersPerPercent.toFixed(1) + 'm';
       document.getElementById('statDistance').textContent = (total / 1609.344).toFixed(2) + ' mi';
       document.getElementById('statPoints').textContent = points.length;
-      document.getElementById('statRange').textContent = grades.length
-        ? Math.min(...grades).toFixed(1) + '% – ' + Math.max(...grades).toFixed(1) + '%'
+      document.getElementById('statRange').textContent = commanded.length
+        ? Math.min(...commanded).toFixed(0) + '% – ' + Math.max(...commanded).toFixed(0) + '%'
         : '–';
 
       const blob = new Blob([xml], { type: 'application/gpx+xml' });
@@ -478,16 +609,20 @@ processBtn.addEventListener('click', () => {
           throw new Error(`That split length would create ${numPartsPreview} files — pick a larger value.`);
         }
         const parts = splitIntoParts(outPoints, breakpoints, total, splitMiles);
+        const zipFiles = [];
         splitList.innerHTML = '';
         for (const part of parts) {
           const partXml = buildGpxXml(part.points, `Incline-adjusted route – Part ${part.index} of ${part.total}`);
+          const partName = `${baseName}_incline_part${part.index}of${part.total}.gpx`;
+          const partBytes = new TextEncoder().encode(partXml);
+          zipFiles.push({ name: partName, data: partBytes });
+
           const partBlob = new Blob([partXml], { type: 'application/gpx+xml' });
           const partUrl = URL.createObjectURL(partBlob);
           activeUrls.push(partUrl);
-          const partName = `${baseName}_incline_part${part.index}of${part.total}.gpx`;
           const range = `${part.startMiles.toFixed(1)}–${part.endMiles.toFixed(1)} mi`;
           const inclineRange = part.grades.length
-            ? `${Math.min(...part.grades).toFixed(1)}%–${Math.max(...part.grades).toFixed(1)}%`
+            ? `${Math.min(...part.grades).toFixed(0)}%–${Math.max(...part.grades).toFixed(0)}%`
             : '–';
 
           const row = document.createElement('div');
@@ -506,6 +641,14 @@ processBtn.addEventListener('click', () => {
           row.appendChild(a);
           splitList.appendChild(row);
         }
+
+        const zipBlob = buildZipBlob(zipFiles);
+        const zipUrl = URL.createObjectURL(zipBlob);
+        activeUrls.push(zipUrl);
+        downloadZipLink.href = zipUrl;
+        downloadZipLink.download = `${baseName}_incline_parts.zip`;
+        downloadZipLink.textContent = `Download all ${parts.length} parts as ZIP`;
+
         splitSection.hidden = false;
       } else {
         splitSection.hidden = true;
