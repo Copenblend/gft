@@ -51,6 +51,29 @@
     border-color: var(--accent);
     background: var(--panel-2);
   }
+  .drop-secondary {
+    padding: 18px 24px;
+    margin-top: 12px;
+  }
+  .drop-secondary .main { font-size: .92rem; }
+  .filename .clear {
+    margin-left: 10px;
+    color: var(--muted);
+    text-decoration: underline;
+    cursor: pointer;
+    font-size: .82rem;
+  }
+  .checkbox-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-top: 10px;
+    color: var(--muted);
+    font-size: .85rem;
+    cursor: pointer;
+    line-height: 1.4;
+  }
+  .checkbox-row input { margin-top: 3px; flex-shrink: 0; }
   .drop p { margin: 0; }
   .drop .main { font-size: 1.02rem; }
   .drop .sub { color: var(--muted); font-size: .88rem; margin-top: 6px; }
@@ -168,6 +191,23 @@
   }
   a.download-small:hover { filter: brightness(1.08); }
 
+
+  .verify { margin-top: 14px; font-size: .85rem; padding: 10px 12px; border: 1px solid var(--border); background: var(--panel-2); }
+  .verify.ok { border-color: var(--safe); color: var(--safe); }
+  .verify.bad { border-color: #e07a7a; color: #e07a7a; }
+  .split-row .info .check { font-size: .78rem; color: var(--safe); }
+  .split-row .info .check.bad { color: #e07a7a; }
+  .speed-wrap { margin-top: 16px; overflow-x: auto; }
+  .speed-wrap h3 { font-size: .95rem; margin: 0 0 4px; }
+  .speed-table { width: 100%; border-collapse: collapse; font-size: .85rem; margin-top: 8px; }
+  .speed-table th, .speed-table td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .speed-table th { color: var(--muted); font-weight: 500; font-size: .78rem; }
+  .speed-table td.num { font-variant-numeric: tabular-nums; }
+  .speed-table tr.ok td.status { color: var(--safe); }
+  .speed-table tr.bad td { color: #e07a7a; }
+  .speed-table tr.over td:first-child::after { content: ' (above your max)'; color: var(--muted); font-size: .75rem; }
+  .speed-table tr.mine td { font-weight: 600; }
+
   footer {
     margin-top: 40px;
     color: var(--muted);
@@ -178,7 +218,7 @@
 <body>
 <div class="wrap">
   <h1>GPX Incline Adjuster</h1>
-  <p class="lede">Flattens descents to 0%, caps climbs at your treadmill's max, and holds each whole-percent incline change to a minimum distance — so the treadmill is never asked to change incline faster than once every few seconds, no matter how choppy the source elevation data is. Optionally splits a long route into standalone files of a set mileage, one per treadmill session.</p>
+  <p class="lede">Rebuilds a GPX so QZ can only move your treadmill one whole percent at a time, never sooner than your "min seconds" apart at your max speed (slower running only spaces them further). A full 0→15% climb takes about 90 s at 12 mph. Descents flatten to 0%, climbs cap at your max, and every file starts from your treadmill's resting incline. Each file is replayed through a copy of QZ's own incline logic before you download it.</p>
 
   <div class="drop" id="drop" tabindex="0" role="button" aria-label="Choose a GPX file">
     <p class="main">Drop a GPX file here, or click to choose one</p>
@@ -186,6 +226,17 @@
     <div class="filename" id="filename"></div>
     <input type="file" id="fileInput" accept=".gpx">
   </div>
+
+  <div class="drop drop-secondary" id="fitDrop" tabindex="0" role="button" aria-label="Choose a FIT file (optional)">
+    <p class="main">Optional: drop the .fit file from your last run to resume</p>
+    <p class="sub">Trims the GPX to start exactly where that recorded distance ends.</p>
+    <div class="filename" id="fitFilename"></div>
+    <input type="file" id="fitInput" accept=".fit">
+  </div>
+  <label class="checkbox-row" id="shiftModeRow">
+    <input type="checkbox" id="shiftMode">
+    Loop route: shift the start here instead of cutting — keeps the whole track, wrapping the covered part to the end
+  </label>
 
   <div class="panel">
     <h2>Settings</h2>
@@ -206,10 +257,17 @@
         <label for="maxIncline">Max incline (%)</label>
         <input type="number" id="maxIncline" value="15" step="1">
       </div>
+      <div>
+        <label for="startIncline">Treadmill incline at start (%)</label>
+        <input type="number" id="startIncline" value="0" min="0" max="15" step="1">
+      </div>
+      <div>
+        <div class="hint" style="margin-top:22px;">Every file ramps from here, 1% at a time.</div>
+      </div>
       <div class="full">
         <label for="splitMiles">Split into files every (mi, 0 = off)</label>
         <input type="number" id="splitMiles" value="0" min="0" step="0.5">
-        <div class="hint">Each file is a complete, standalone GPX — useful for loading a long route one session at a time.</div>
+        <div class="hint">Each file is a standalone GPX that starts at your resting incline — load one per session. Every file also runs a short way past its end, stepping back down to 0%, so nothing jumps if you keep going.</div>
       </div>
     </div>
   </div>
@@ -219,11 +277,18 @@
 
   <div class="panel" id="results">
     <h2>Result</h2>
+    <div class="hint" id="resumeNote" style="margin-bottom:12px;" hidden></div>
     <div class="stat-row">
-      <div class="stat"><div class="num" id="statRate">–</div><div class="label">guaranteed max rate</div></div>
+      <div class="stat"><div class="num" id="statRate">–</div><div class="label">planned spacing between changes at max speed</div></div>
       <div class="stat"><div class="num" id="statDistance">–</div><div class="label">total distance</div></div>
-      <div class="stat"><div class="num" id="statPoints">–</div><div class="label">input track points</div></div>
+      <div class="stat"><div class="num" id="statPoints">–</div><div class="label">incline changes on this route</div></div>
       <div class="stat"><div class="num" id="statRange">–</div><div class="label">incline range in output</div></div>
+    </div>
+    <div class="verify" id="verifyBox" hidden></div>
+    <div class="speed-wrap" id="speedSection" hidden>
+      <h3>Closest two incline changes at each speed</h3>
+      <div class="hint" id="speedHint"></div>
+      <table class="speed-table" id="speedTable"></table>
     </div>
     <a class="download" id="downloadLink">Download adjusted GPX</a>
 
@@ -239,27 +304,279 @@
 
 <script>
 // ============================================================
-// Geometry / GPX helpers
+// Geometry, QZ encoder and QZ replay
 // ============================================================
+let haversine;
+// ============================================================
+// QZ-exact incline encoder ("comb" layout)
+// ------------------------------------------------------------
+// How QZ turns a GPX into Sole F80 button presses (qdomyos-zwift src):
+//  gpx.cpp          each trkpt -> row {distance = Qt haversine to prev point, inclination = dEle/dist*100}
+//  trainprogram.cpp every 1 s (and on every row change) requests avgInclinationNext100Meters():
+//                   sum(row.inclination*row.distance) from the CURRENT row's start through the first
+//                   row that pushes the look-ahead past 100 m, divided by the distance from YOUR
+//                   position. The current row's full rise stays in the sum while the divisor shrinks,
+//                   so the request drifts inside every row, and any grade change is smeared over 100 m.
+//  treadmill.cpp    rounds to the 0.5% step; solef80treadmill.cpp truncates to a whole %, then every
+//                   300 ms presses incline up/down once until the console matches.
+// Encoding used here: every row is ~ROW_M metres and any ROWS_PER_WINDOW consecutive rows total a
+// hair under 100 m in QZ's own distance math, so QZ's window is always exactly 51 rows and its request
+// is (their total rise)/100 m. The total rise is held at whole levels and changes by one level at a
+// single row boundary, never sooner than the hold distance after the previous change.
+// ============================================================
+const QT_R = 6371.0072 * 1000;          // Qt qgeocoordinate_EARTH_MEAN_RADIUS (metres)
+const ROW_M = 2;                         // every output segment is exactly 2 m
+const ROWS_PER_WINDOW = 50;              // 50 x 2 m = QZ's 100 m look-ahead
+const PERIOD_ROWS = ROWS_PER_WINDOW + 1; // 51 rows: 1 climbing row + 50 flat rows
+const PERIOD_M = PERIOD_ROWS * ROW_M;    // 102 m: length of QZ's window in rows (51 x 2 m)
+const RISE_SCALE = 1.01;                 // centres QZ's result on the level (divisor is 100..102 m)
+const RAD = Math.PI / 180;
 
-function haversine(lat1, lon1, lat2, lon2) {
-  const R = 6371000.0;
-  const phi1 = lat1 * Math.PI / 180, phi2 = lat2 * Math.PI / 180;
-  const dphi = (lat2 - lat1) * Math.PI / 180;
-  const dlambda = (lon2 - lon1) * Math.PI / 180;
-  const a = Math.sin(dphi / 2) ** 2 + Math.cos(phi1) * Math.cos(phi2) * Math.sin(dlambda / 2) ** 2;
-  return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+function qtDistance(lat1, lon1, lat2, lon2) {  // identical to QGeoCoordinate::distanceTo
+  const dlat = (lat2 - lat1) * RAD, dlon = (lon2 - lon1) * RAD;
+  let hl = Math.sin(dlat / 2); hl *= hl;
+  let ho = Math.sin(dlon / 2); ho *= ho;
+  const y = hl + Math.cos(lat1 * RAD) * Math.cos(lat2 * RAD) * ho;
+  return 2 * Math.asin(Math.sqrt(y)) * QT_R;
 }
+function bearing(lat1, lon1, lat2, lon2) {
+  const p1 = lat1 * RAD, p2 = lat2 * RAD, dl = (lon2 - lon1) * RAD;
+  return Math.atan2(Math.sin(dl) * Math.cos(p2), Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl));
+}
+function destination(lat, lon, brg, dist) {
+  const d = dist / QT_R, p1 = lat * RAD, l1 = lon * RAD;
+  const p2 = Math.asin(Math.sin(p1) * Math.cos(d) + Math.cos(p1) * Math.sin(d) * Math.cos(brg));
+  const l2 = l1 + Math.atan2(Math.sin(brg) * Math.sin(d) * Math.cos(p1), Math.cos(d) - Math.sin(p1) * Math.sin(p2));
+  return { lat: p2 / RAD, lon: ((l2 / RAD + 540) % 360) - 180 };
+}
+
+// Route = original points + cumulative along-path distance; posAt(s) works past the end too
+// (continues on the final bearing) so the cool-down run-out has somewhere to go.
+function makeRoute(points) {
+  const cum = [0];
+  for (let i = 1; i < points.length; i++) {
+    cum.push(cum[i - 1] + qtDistance(points[i - 1].lat, points[i - 1].lon, points[i].lat, points[i].lon));
+  }
+  const total = cum[cum.length - 1];
+  let endBrg = 0;
+  for (let i = points.length - 1; i > 0; i--) {
+    if (cum[i] - cum[i - 1] > 0.01) { endBrg = bearing(points[i - 1].lat, points[i - 1].lon, points[i].lat, points[i].lon); break; }
+  }
+  function locate(s) {
+    let lo = 0, hi = cum.length - 1;
+    while (lo < hi - 1) { const mid = (lo + hi) >> 1; if (cum[mid] <= s) lo = mid; else hi = mid; }
+    return lo;
+  }
+  function posAt(s) {
+    if (s >= total) {
+      const last = points[points.length - 1];
+      return s - total < 1e-9 ? { lat: last.lat, lon: last.lon } : destination(last.lat, last.lon, endBrg, s - total);
+    }
+    if (s <= 0) return { lat: points[0].lat, lon: points[0].lon };
+    const i = locate(s), seg = cum[i + 1] - cum[i];
+    const t = seg <= 0 ? 0 : (s - cum[i]) / seg;
+    return { lat: points[i].lat + t * (points[i + 1].lat - points[i].lat), lon: points[i].lon + t * (points[i + 1].lon - points[i].lon) };
+  }
+  function eleAt(s) {
+    if (s >= total) return points[points.length - 1].ele;
+    if (s <= 0) return points[0].ele;
+    const i = locate(s), seg = cum[i + 1] - cum[i];
+    const t = seg <= 0 ? 0 : (s - cum[i]) / seg;
+    return points[i].ele + t * (points[i + 1].ele - points[i].ele);
+  }
+  return { points, cum, total, posAt, eleAt };
+}
+
+// ------------------------------------------------------------
+// "Sliding-window" layout. Every row is ~2 m and ANY 50 consecutive rows total a hair under 100 m in
+// QZ's own arithmetic, so QZ's look-ahead always covers exactly 51 rows (the current one + the next 50).
+// QZ's request is then (total rise of those 51 rows) / (100..102 m). We keep that total at exactly
+// UNIT * level metres, so the request sits at the level (+/-1%) and can only move when you cross a row
+// boundary: row j leaves the window and row j+51 enters. To move one level we give row j+51 one UNIT
+// more (or less) rise than row j. Every row's rise stays >= 0, so once the level is back at 0 every row
+// is flat and the end of the file is clean.
+// ------------------------------------------------------------
+const WIN = PERIOD_ROWS;                 // 51 rows in QZ's window
+const UNIT = RISE_SCALE;                 // 1.01 m of rise in the window = 1% requested
+
+// Target level per block of holdRows rows: 100 m-smoothed route grade, whole %, with hysteresis,
+// then forward/backward slew limiting averaged so climbs are anticipated, not lagged.
+function planTargets(route, s0, s1, o) {
+  const lo = Math.max(0, Math.ceil(o.minIncline)), hi = Math.min(15, Math.floor(o.maxIncline));
+  const B = o.holdRows * ROW_M, W = Math.max(100, B);
+  const n = Math.max(1, Math.ceil((s1 - s0) / B));
+  const q = [];
+  let held = null;
+  for (let k = 0; k < n; k++) {
+    const c = s0 + (k + 0.5) * B;
+    const a = Math.max(0, c - W / 2), b = Math.min(route.total, c + W / 2);
+    const g = b - a > 1 ? (route.eleAt(b) - route.eleAt(a)) / (b - a) * 100 : 0;
+    const gc = Math.min(hi, Math.max(lo, g));
+    if (held === null || Math.abs(gc - held) >= 0.75) held = Math.min(hi, Math.max(lo, Math.round(gc)));
+    q.push(held);
+  }
+  const fwd = [], bwd = new Array(n);
+  let p = o.startIncline;
+  // each pass slews 2 per block, so their average is a ramp of 1 per block CENTRED on each grade change
+  for (let k = 0; k < n; k++) { p = Math.min(p + 2, Math.max(p - 2, q[k])); fwd.push(p); }
+  p = q[n - 1];
+  for (let k = n - 1; k >= 0; k--) { p = Math.min(p + 2, Math.max(p - 2, q[k])); bwd[k] = p; }
+  return fwd.map((f, k) => Math.round((f + bwd[k]) / 2));
+}
+
+// Build the GPX points for route distance [s0, s1] plus a run-out that steps back down to 0%.
+function buildComb(route, s0, s1, o) {
+  const H = o.holdRows;
+  const want = planTargets(route, s0, s1, o);
+  const realRows = Math.max(1, Math.ceil((s1 - s0) / ROW_M));
+
+  // ---- 1. decide the level for every row and each row's rise (in UNITs) ----
+  const units = [o.startIncline];
+  for (let i = 1; i < WIN; i++) units.push(0);
+  const H2 = o.holdRowsAfterReversal || H;  // QZ's Sole driver drops the 1st request after a direction flip
+  let cur = o.startIncline, lastChange = -Infinity, j = 0, lastDir = 0, lastWasFlip = false;
+  let minL = cur, maxL = cur, changes = 0, allChanges = 0;
+  for (;;) {
+    const nextRow = j + 1;
+    const w = nextRow < realRows ? want[Math.min(want.length - 1, Math.floor(nextRow / H))] : 0;
+    let d = 0;
+    if (w !== cur && nextRow - lastChange >= (lastWasFlip ? H2 : H)) {
+      d = w > cur ? 1 : -1;
+      if (d < 0 && units[j] < 1) d = 0;      // row leaving the window has no climb to give back yet
+    }
+    if (d) { lastWasFlip = lastDir !== 0 && d !== lastDir; lastDir = d; cur += d; lastChange = nextRow; allChanges++; if (nextRow < realRows) changes++; }
+    units[j + WIN] = units[j] + d;
+    if (nextRow < realRows) { minL = Math.min(minL, cur); maxL = Math.max(maxL, cur); }
+    j = nextRow;
+    if (j >= realRows && cur === 0 && j - Math.max(lastChange, realRows) >= 2 * WIN) break;
+  }
+  const nRows = j;
+
+  // ---- 2. place the points: every 50 consecutive rows = (100 m - 1..20 nm) in QZ's arithmetic ----
+  const fmt = v => v.toFixed(14);
+  const out = [];
+  let prev = route.posAt(s0);
+  prev = { lat: +fmt(prev.lat), lon: +fmt(prev.lon) };
+  let ele = route.eleAt(s0);
+  let brg = 0;
+  const dists = [];
+  out.push({ lat: prev.lat, lon: prev.lon, ele });
+  for (let r = 0; r < nRows; r++) {
+    const tgt = route.posAt(s0 + (r + 1) * ROW_M);
+    if (qtDistance(prev.lat, prev.lon, tgt.lat, tgt.lon) > 0.05) brg = bearing(prev.lat, prev.lon, tgt.lat, tgt.lon);
+    let before = 0;
+    if (r >= ROWS_PER_WINDOW - 1) for (let i = r - ROWS_PER_WINDOW + 1; i < r; i++) before += dists[i];
+    let len = r >= ROWS_PER_WINDOW - 1 ? 100 - 1.5e-8 - before : ROW_M, nxt, d;
+    for (let tries = 0; tries < 16; tries++) {
+      const q = destination(prev.lat, prev.lon, brg, len);
+      nxt = { lat: +fmt(q.lat), lon: +fmt(q.lon) };
+      d = qtDistance(prev.lat, prev.lon, nxt.lat, nxt.lon);        // what QZ will measure
+      if (r < ROWS_PER_WINDOW - 1) break;
+      const excess = before + d - (100 - 1e-8);
+      if (excess <= 0 && excess > -1e-8) break;
+      len -= excess + 5e-9;
+    }
+    dists.push(d);
+    prev = nxt;
+    ele += units[r] * UNIT;
+    out.push({ lat: prev.lat, lon: prev.lon, ele });
+  }
+  return { outPoints: out, minLevel: minL, maxLevel: maxL, changes, totalChanges: allChanges,
+           spacingM: H * ROW_M, runoutM: (nRows - realRows) * ROW_M };
+}
+
+function buildGpxXml(outPoints, trackName) {
+  const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const parts = ['<?xml version="1.0" encoding="UTF-8"?>\n',
+    '<gpx version="1.1" creator="gpx-incline-adjuster-web" xmlns="http://www.topografix.com/GPX/1/1">\n',
+    `  <trk>\n    <name>${esc(trackName)}</name>\n    <trkseg>\n`];
+  for (const p of outPoints) {
+    parts.push(`      <trkpt lat="${p.lat.toFixed(14)}" lon="${p.lon.toFixed(14)}"><ele>${p.ele.toFixed(6)}</ele></trkpt>\n`);
+  }
+  parts.push('    </trkseg>\n  </trk>\n</gpx>\n');
+  return parts.join('');
+}
+
+// ============================================================
+// QZ replay: an independent port of QZ's GPX -> Sole F80 path, run on the finished XML text.
+// Reports every simulated incline button press so the file is checked, not just trusted.
+// ============================================================
+function cRound(x) { return x >= 0 ? Math.floor(x + 0.5) : -Math.floor(-x + 0.5); }
+function qzRowsFromXml(xml) {
+  const re = /<trkpt\s+lat="([^"]+)"\s+lon="([^"]+)"\s*>\s*<ele>([^<]*)<\/ele>/g;
+  const pts = []; let m;
+  while ((m = re.exec(xml))) pts.push([parseFloat(m[1]), parseFloat(m[2]), parseFloat(m[3])]);
+  // QZ auto-closes routes whose ends are < 300 m apart (gpx.cpp) — replicate that too
+  if (pts.length > 2 && qtDistance(pts[0][0], pts[0][1], pts[pts.length - 1][0], pts[pts.length - 1][1]) < 300) pts.push(pts[0].slice());
+  const dist = [], inc = [];
+  let pp = pts[0];
+  for (let i = 1; i < pts.length; i++) {
+    const d = qtDistance(pts[i][0], pts[i][1], pp[0], pp[1]);
+    if (d === 0) continue;
+    dist.push(d / 1000); inc.push((pts[i][2] - pp[2]) / d * 100); pp = pts[i];
+  }
+  return { dist, inc };
+}
+function qzReplay(rows, mph, stepIncline, startIncline, maxSeconds) {
+  const { dist, inc } = rows, N = dist.length;
+  const v = mph * 1609.344 / 3600 / 1000; // km per second
+  let step = 0, csd = 0, lastOdo = 0, req = -100, cur = startIncline, state = 0, done = false;
+  const presses = [];
+  const avg100 = () => {
+    let c = step, km = 0, avg = 0, sum = 0;
+    for (;;) {
+      if (c < N) {
+        if (km > 0.1) return sum === 1 ? inc[step] : avg / km;
+        km += c === step ? dist[c] - csd : dist[c];
+        avg += inc[c] * dist[c]; sum++;
+      } else return sum === 1 ? inc[step] : avg / km;
+      c++;
+    }
+  };
+  const change = g => { req = cRound(g / stepIncline) * stepIncline; };
+  const tick = (odo, first) => {
+    if (first) { csd = 0; lastOdo = odo; change(avg100()); return; }
+    for (;;) {
+      csd += odo - lastOdo; lastOdo = odo;
+      if (step >= N) { done = true; return; }
+      const ev = csd >= dist[step];
+      if (ev) {
+        lastOdo -= csd - dist[step]; step++;
+        if (step >= N) { done = true; return; }
+        csd = 0; change(avg100());
+      } else { change(avg100()); return; }
+    }
+  };
+  const update = t => {
+    if (req === -100) return;
+    if (req < 0) req = 0;
+    if (Math.trunc(req) !== Math.trunc(cur) && req >= 0 && req <= 15) {
+      if (req > cur) {
+        if (state === 0) state = 1; else if (state === -1) { state = 0; req = -100; return; }
+        presses.push({ t, dir: 1, at: cur + 1 }); cur += 1;
+      } else if (req < cur) {
+        if (state === 0) state = -1; else if (state === 1) { state = 0; req = -100; return; }
+        presses.push({ t, dir: -1, at: cur - 1 }); cur -= 1;
+      } else { req = -100; state = 0; }
+    } else if (Math.trunc(req) === Math.trunc(cur)) req = -100;
+  };
+  let nextTick = 1000, nextUpd = 300;
+  const limit = maxSeconds * 1000;
+  while (!done) {
+    const t = Math.min(nextTick, nextUpd);
+    if (t > limit) break;
+    if (t === nextTick) { tick(v * (t / 1000), nextTick === 1000); nextTick += 1000; }
+    if (t === nextUpd) { update(t / 1000); nextUpd += 300; }
+  }
+  return presses;
+}
+
 
 function parseGpxTime(text) {
   if (!text) return null;
   const d = new Date(text.trim());
   return isNaN(d.getTime()) ? null : d;
 }
-function formatGpxTime(d) {
-  return d.toISOString().replace(/\.\d{3}Z$/, 'Z');
-}
-
 function loadPoints(xmlText) {
   const doc = new DOMParser().parseFromString(xmlText, 'application/xml');
   if (doc.getElementsByTagName('parsererror').length) {
@@ -274,177 +591,163 @@ function loadPoints(xmlText) {
     const lat = parseFloat(el.getAttribute('lat'));
     const lon = parseFloat(el.getAttribute('lon'));
     const eleEl = el.getElementsByTagName('ele')[0];
-    const timeEl = el.getElementsByTagName('time')[0];
     const ele = eleEl ? parseFloat(eleEl.textContent) : 0.0;
-    const time = timeEl ? parseGpxTime(timeEl.textContent) : null;
-    points.push({ lat, lon, ele: isNaN(ele) ? 0.0 : ele, time });
+    if (isNaN(lat) || isNaN(lon)) continue;
+    points.push({ lat, lon, ele: isNaN(ele) ? 0.0 : ele });
   }
+  if (points.length < 2) throw new Error('GPX file needs at least 2 track points with valid lat/lon.');
   return points;
 }
-
 function buildCumulativeDistance(points) {
   const cum = [0];
-  for (let i = 1; i < points.length; i++) {
-    cum.push(cum[cum.length - 1] + haversine(points[i - 1].lat, points[i - 1].lon, points[i].lat, points[i].lon));
-  }
+  for (let i = 1; i < points.length; i++) cum.push(cum[i - 1] + qtDistance(points[i - 1].lat, points[i - 1].lon, points[i].lat, points[i].lon));
   return cum;
 }
-
 function interpolateAt(points, cum, targetDist) {
-  if (targetDist <= 0) { const p = points[0]; return { lat: p.lat, lon: p.lon, ele: p.ele, time: p.time }; }
-  if (targetDist >= cum[cum.length - 1]) { const p = points[points.length - 1]; return { lat: p.lat, lon: p.lon, ele: p.ele, time: p.time }; }
+  if (targetDist <= 0) { const p = points[0]; return { lat: p.lat, lon: p.lon, ele: p.ele }; }
+  if (targetDist >= cum[cum.length - 1]) { const p = points[points.length - 1]; return { lat: p.lat, lon: p.lon, ele: p.ele }; }
   let lo = 0, hi = cum.length - 1;
-  while (lo < hi - 1) {
-    const mid = (lo + hi) >> 1;
-    if (cum[mid] <= targetDist) lo = mid; else hi = mid;
-  }
-  const i = lo, j = lo + 1;
-  const segLen = cum[j] - cum[i];
-  const t = segLen <= 0 ? 0 : (targetDist - cum[i]) / segLen;
-  const p0 = points[i], p1 = points[j];
-  return {
-    lat: p0.lat + t * (p1.lat - p0.lat),
-    lon: p0.lon + t * (p1.lon - p0.lon),
-    ele: p0.ele + t * (p1.ele - p0.ele),
-    time: (p0.time && p1.time) ? new Date(p0.time.getTime() + t * (p1.time.getTime() - p0.time.getTime())) : null,
-  };
+  while (lo < hi - 1) { const mid = (lo + hi) >> 1; if (cum[mid] <= targetDist) lo = mid; else hi = mid; }
+  const segLen = cum[lo + 1] - cum[lo];
+  const t = segLen <= 0 ? 0 : (targetDist - cum[lo]) / segLen;
+  const p0 = points[lo], p1 = points[lo + 1];
+  return { lat: p0.lat + t * (p1.lat - p0.lat), lon: p0.lon + t * (p1.lon - p0.lon), ele: p0.ele + t * (p1.ele - p0.ele) };
 }
+haversine = qtDistance;
 
-function clipGrade(gradePct, minIncline, maxIncline) {
-  if (gradePct < minIncline) return minIncline;
-  if (gradePct > maxIncline) return maxIncline;
-  return gradePct;
-}
-
-// Centered moving average over a fixed number of segments (O(n) via prefix sums).
-// Smooths out GPS/elevation noise before rate-limiting so the output doesn't
-// hover right at a whole-percent boundary and flicker back and forth across it.
-function smoothTargets(segTarget, windowSegments) {
-  const n = segTarget.length;
-  const half = Math.floor(windowSegments / 2);
-  const prefix = new Array(n + 1).fill(0);
-  for (let i = 0; i < n; i++) prefix[i + 1] = prefix[i] + segTarget[i];
-  const smoothed = new Array(n);
-  for (let i = 0; i < n; i++) {
-    const lo = Math.max(0, i - half);
-    const hi = Math.min(n - 1, i + half);
-    smoothed[i] = (prefix[hi + 1] - prefix[lo]) / (hi - lo + 1);
-  }
-  return smoothed;
-}
-
-// ============================================================
-// Core algorithm: whole-percent incline steps, each held for a
-// minimum real-world distance (metersPerPercent), so a treadmill
-// reacting to whole-percent changes can never be asked to change
-// more often than once every metersPerPercent of travel.
-// ============================================================
-function buildInclineProfile(points, resampleStep, metersPerPercent, minIncline, maxIncline, smoothWindowMeters, stepSize) {
-  const cum = buildCumulativeDistance(points);
-  const total = cum[cum.length - 1];
-  if (total <= 0) throw new Error('Track has zero horizontal distance.');
-
-  const numFull = Math.floor(total / resampleStep);
-  let breakpoints;
-  if (numFull === 0) {
-    breakpoints = [0, total];
-  } else {
-    breakpoints = Array.from({ length: numFull }, (_, i) => i * resampleStep);
-    breakpoints.push(total);
-  }
-
-  const raw = breakpoints.map(d => interpolateAt(points, cum, d));
-
-  // Target grade for each sub-segment, clipped to the allowed range.
-  let segTarget = [];
-  for (let j = 1; j < breakpoints.length; j++) {
-    const segLen = breakpoints[j] - breakpoints[j - 1];
-    const rawDelta = raw[j].ele - raw[j - 1].ele;
-    const gradePct = segLen > 0 ? (rawDelta / segLen) * 100 : 0;
-    segTarget.push(clipGrade(gradePct, minIncline, maxIncline));
-  }
-
-  const windowSegments = Math.max(1, Math.round(smoothWindowMeters / resampleStep));
-  segTarget = smoothTargets(segTarget, windowSegments).map(v => clipGrade(v, minIncline, maxIncline));
-
-  const minLevel = Math.round(minIncline / stepSize);
-  const maxLevel = Math.round(maxIncline / stepSize);
-
-  let currentLevel = Math.min(maxLevel, Math.max(minLevel, Math.round(segTarget[0] / stepSize)));
-  let distSinceChange = 0; // the dwell restriction applies from the very first potential change too
-  const commandedLevel = [currentLevel];
-
-  for (let k = 1; k < segTarget.length; k++) {
-    const segLen = breakpoints[k + 1] - breakpoints[k];
-    distSinceChange += segLen;
-    const targetLevel = Math.min(maxLevel, Math.max(minLevel, Math.round(segTarget[k] / stepSize)));
-    if (distSinceChange >= metersPerPercent && targetLevel !== currentLevel) {
-      currentLevel += (targetLevel > currentLevel ? 1 : -1);
-      distSinceChange = 0;
+// Replays a finished file through the QZ model at several belt speeds.
+function verifyXml(xml, speeds, startIncline, expectedPresses, minSeconds) {
+  const rows = qzRowsFromXml(xml);
+  let presses = 0, minGap = Infinity, minGapMph = null, multiStep = false;
+  const perSpeed = [];
+  for (const mph of speeds) {
+    const pr = qzReplay(rows, mph, 0.5, startIncline, 1e9);
+    presses = Math.max(presses, pr.length);
+    let g1 = Infinity, under = 0;
+    for (let i = 1; i < pr.length; i++) {
+      const g = pr[i].t - pr[i - 1].t;
+      if (g < g1) g1 = g;
+      if (g < minSeconds) under++;
     }
-    commandedLevel.push(currentLevel);
+    perSpeed.push({ mph, presses: pr.length, minGap: g1, under, planned: pr.length === expectedPresses });
+    if (g1 < minGap) { minGap = g1; minGapMph = mph; }
+    if (pr.length && Math.abs(pr[0].at - startIncline) > 1) multiStep = true;
   }
-  const commanded = commandedLevel.map(l => l * stepSize);
-
-  const outPoints = [{ lat: raw[0].lat, lon: raw[0].lon, ele: raw[0].ele, time: raw[0].time }];
-  let ele = raw[0].ele;
-  for (let k = 0; k < commanded.length; k++) {
-    const segLen = breakpoints[k + 1] - breakpoints[k];
-    ele += (commanded[k] / 100) * segLen;
-    outPoints.push({ lat: raw[k + 1].lat, lon: raw[k + 1].lon, ele, time: raw[k + 1].time });
-  }
-
-  return { outPoints, breakpoints, total, commanded };
+  return { presses, minGap, minGapMph, multiStep, perSpeed };
 }
 
-function splitIntoParts(outPoints, breakpoints, total, splitMiles) {
-  const splitLenM = splitMiles * 1609.344;
-  const numParts = Math.max(1, Math.ceil(total / splitLenM));
-  const parts = [];
+// Pass/fail looks only at speeds up to your max; faster rows are shown in the table as information.
+function checkUpTo(v, maxMph) {
+  const within = v.perSpeed.filter(s => s.mph <= maxMph + 1e-9);
+  let minGap = Infinity, minGapMph = null;
+  for (const s of within) if (s.minGap < minGap) { minGap = s.minGap; minGapMph = s.mph; }
+  // every press QZ makes at these speeds must be one we planned
+  return { presses: v.presses, minGap, minGapMph, multiStep: v.multiStep, extra: within.some(s => !s.planned) };
+}
 
-  for (let k = 0; k < numParts; k++) {
-    const startDist = k * splitLenM;
-    const endDist = Math.min((k + 1) * splitLenM, total);
-
-    const slice = [{ point: interpolateAt(outPoints, breakpoints, startDist), dist: startDist }];
-    for (let i = 0; i < breakpoints.length; i++) {
-      if (breakpoints[i] > startDist + 1e-6 && breakpoints[i] < endDist - 1e-6) {
-        slice.push({ point: outPoints[i], dist: breakpoints[i] });
-      }
-    }
-    slice.push({ point: interpolateAt(outPoints, breakpoints, endDist), dist: endDist });
-
-    const grades = [];
-    for (let i = 1; i < slice.length; i++) {
-      const d = slice[i].dist - slice[i - 1].dist;
-      if (d > 0) grades.push(((slice[i].point.ele - slice[i - 1].point.ele) / d) * 100);
-    }
-
-    parts.push({
-      index: k + 1,
-      total: numParts,
-      startMiles: startDist / 1609.344,
-      endMiles: endDist / 1609.344,
-      points: slice.map(s => s.point),
-      grades,
+function renderSpeedTable(perSpeed, maxMph, minSeconds) {
+  const table = document.getElementById('speedTable');
+  table.innerHTML = '';
+  const head = table.createTHead().insertRow();
+  ['Speed', 'Closest two changes', `Gaps under ${minSeconds} s`, ''].forEach(t => {
+    const th = document.createElement('th'); th.textContent = t; head.appendChild(th);
+  });
+  const body = table.createTBody();
+  let firstBad = null;
+  for (const s of perSpeed) {
+    const tr = body.insertRow();
+    const bad = s.presses > 1 && s.minGap < minSeconds;
+    if (bad && firstBad === null) firstBad = s.mph;
+    tr.className = (bad ? 'bad' : 'ok') + (s.mph > maxMph + 1e-9 ? ' over' : '') + (Math.abs(s.mph - maxMph) < 1e-9 ? ' mine' : '');
+    const cells = [
+      `${s.mph} mph`,
+      s.presses > 1 ? `${s.minGap.toFixed(1)} s` : '—',
+      s.presses > 1 ? String(s.under) : '—',
+      bad ? `below ${minSeconds} s` : 'OK',
+    ];
+    cells.forEach((t, i) => {
+      const td = tr.insertCell(); td.textContent = t;
+      if (i === 1 || i === 2) td.className = 'num';
+      if (i === 3) td.className = 'status';
     });
   }
-  return parts;
+  document.getElementById('speedHint').textContent = firstBad === null
+    ? `Every speed in the table keeps changes at least ${minSeconds} s apart.`
+    : `From ${firstBad} mph up, some changes come closer than ${minSeconds} s. If you might run that fast, raise "Max treadmill speed" to it and process again — changes just get spaced a bit further apart.`;
+  document.getElementById('speedSection').hidden = false;
 }
 
-function buildGpxXml(outPoints, trackName) {
-  const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  let xml = '<?xml version="1.0" encoding="UTF-8"?>\n';
-  xml += '<gpx version="1.1" creator="gpx-incline-adjuster-web" xmlns="http://www.topografix.com/GPX/1/1">\n';
-  xml += `  <trk>\n    <name>${esc(trackName)}</name>\n    <trkseg>\n`;
-  for (const p of outPoints) {
-    xml += `      <trkpt lat="${p.lat.toFixed(7)}" lon="${p.lon.toFixed(7)}">\n`;
-    xml += `        <ele>${p.ele.toFixed(2)}</ele>\n`;
-    if (p.time) xml += `        <time>${formatGpxTime(p.time)}</time>\n`;
-    xml += `      </trkpt>\n`;
+// ============================================================
+// Minimal FIT file reader — extracts only the recorded distance,
+// so a previous run's .fit can tell us where to resume a GPX.
+// Prefers the session summary's total_distance; falls back to the
+// last record message's distance if no session message exists.
+// ============================================================
+function parseFitDistanceMeters(arrayBuffer) {
+  const view = new DataView(arrayBuffer);
+  const len = arrayBuffer.byteLength;
+  if (len < 12) throw new Error('That file is too small to be a valid FIT file.');
+
+  const headerSize = view.getUint8(0);
+  const sig = String.fromCharCode(view.getUint8(8), view.getUint8(9), view.getUint8(10), view.getUint8(11));
+  if (sig !== '.FIT') throw new Error('That does not look like a valid FIT file.');
+
+  let pos = headerSize;
+  const dataEnd = len - 2; // trailing 2 bytes are the file CRC
+  const definitions = {};
+  let lastRecordDistance = null;
+  let sessionTotalDistance = null;
+
+  while (pos < dataEnd) {
+    const header = view.getUint8(pos);
+    pos += 1;
+    const compressedTimestamp = (header & 0x80) !== 0;
+    const isDefinition = !compressedTimestamp && (header & 0x40) !== 0;
+    const localType = compressedTimestamp ? ((header >> 5) & 0x3) : (header & 0x0F);
+
+    if (isDefinition) {
+      pos += 1; // reserved
+      const arch = view.getUint8(pos); pos += 1;
+      const littleEndian = arch === 0;
+      const globalMesgNum = littleEndian ? view.getUint16(pos, true) : view.getUint16(pos, false);
+      pos += 2;
+      const numFields = view.getUint8(pos); pos += 1;
+      const fields = [];
+      for (let i = 0; i < numFields; i++) {
+        fields.push({ num: view.getUint8(pos), size: view.getUint8(pos + 1) });
+        pos += 3;
+      }
+      let devFieldsSize = 0;
+      if (header & 0x20) { // developer fields: contribute extra bytes to every data message of this type
+        const numDevFields = view.getUint8(pos); pos += 1;
+        for (let i = 0; i < numDevFields; i++) {
+          devFieldsSize += view.getUint8(pos + 1); // middle byte of each 3-byte entry is its size
+          pos += 3;
+        }
+      }
+      definitions[localType] = { globalMesgNum, littleEndian, fields, devFieldsSize };
+    } else {
+      const def = definitions[localType];
+      if (!def) throw new Error('That FIT file looks malformed (data before its definition).');
+      let fieldPos = pos;
+      for (const field of def.fields) {
+        if (def.globalMesgNum === 20 && field.num === 5 && field.size === 4) {
+          const raw = def.littleEndian ? view.getUint32(fieldPos, true) : view.getUint32(fieldPos, false);
+          if (raw !== 0xFFFFFFFF) lastRecordDistance = raw / 100;
+        } else if (def.globalMesgNum === 18 && field.num === 9 && field.size === 4) {
+          const raw = def.littleEndian ? view.getUint32(fieldPos, true) : view.getUint32(fieldPos, false);
+          if (raw !== 0xFFFFFFFF) sessionTotalDistance = raw / 100;
+        }
+        fieldPos += field.size;
+      }
+      fieldPos += def.devFieldsSize; // skip developer field values too — they're part of every data message
+      pos = fieldPos;
+    }
   }
-  xml += '    </trkseg>\n  </trk>\n</gpx>\n';
-  return xml;
+
+  const distance = sessionTotalDistance != null ? sessionTotalDistance : lastRecordDistance;
+  if (distance == null) throw new Error('Could not find a distance field in that FIT file.');
+  return { distanceMeters: distance, source: sessionTotalDistance != null ? 'session summary' : 'last recorded point' };
 }
 
 // ============================================================
@@ -526,17 +829,39 @@ function buildZipBlob(files) {
 const drop = document.getElementById('drop');
 const fileInput = document.getElementById('fileInput');
 const filenameEl = document.getElementById('filename');
+const fitDrop = document.getElementById('fitDrop');
+const fitInput = document.getElementById('fitInput');
+const fitFilenameEl = document.getElementById('fitFilename');
 const processBtn = document.getElementById('processBtn');
 const errorEl = document.getElementById('error');
 const resultsEl = document.getElementById('results');
+const resumeNoteEl = document.getElementById('resumeNote');
 const downloadLink = document.getElementById('downloadLink');
 const downloadZipLink = document.getElementById('downloadZipLink');
 const splitSection = document.getElementById('splitSection');
 const splitList = document.getElementById('splitList');
 
 let currentFile = null;
+let currentFitFile = null;
 let activeUrls = [];
 function revokeActiveUrls() { activeUrls.forEach(u => URL.revokeObjectURL(u)); activeUrls = []; }
+
+function readFileAsText(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(new Error('Could not read that file.'));
+    r.readAsText(file);
+  });
+}
+function readFileAsArrayBuffer(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(new Error('Could not read the FIT file.'));
+    r.readAsArrayBuffer(file);
+  });
+}
 
 function showError(msg) { errorEl.textContent = msg; errorEl.hidden = false; }
 function clearError() { errorEl.hidden = true; }
@@ -550,6 +875,24 @@ function setFile(file) {
   processBtn.disabled = false;
 }
 
+function setFitFile(file) {
+  clearError();
+  if (!file) return;
+  currentFitFile = file;
+  fitFilenameEl.innerHTML = '';
+  fitFilenameEl.append(file.name);
+  const clear = document.createElement('span');
+  clear.className = 'clear';
+  clear.textContent = 'Remove';
+  clear.addEventListener('click', e => {
+    e.stopPropagation();
+    currentFitFile = null;
+    fitFilenameEl.textContent = '';
+    fitInput.value = '';
+  });
+  fitFilenameEl.append(clear);
+}
+
 drop.addEventListener('click', () => fileInput.click());
 drop.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') fileInput.click(); });
 fileInput.addEventListener('change', () => setFile(fileInput.files[0]));
@@ -557,110 +900,206 @@ fileInput.addEventListener('change', () => setFile(fileInput.files[0]));
 ['dragleave', 'drop'].forEach(evt => drop.addEventListener(evt, e => { e.preventDefault(); drop.classList.remove('drag'); }));
 drop.addEventListener('drop', e => { const file = e.dataTransfer.files[0]; if (file) setFile(file); });
 
-processBtn.addEventListener('click', () => {
+fitDrop.addEventListener('click', () => fitInput.click());
+fitDrop.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') fitInput.click(); });
+fitInput.addEventListener('change', () => setFitFile(fitInput.files[0]));
+['dragover', 'dragenter'].forEach(evt => fitDrop.addEventListener(evt, e => { e.preventDefault(); fitDrop.classList.add('drag'); }));
+['dragleave', 'drop'].forEach(evt => fitDrop.addEventListener(evt, e => { e.preventDefault(); fitDrop.classList.remove('drag'); }));
+fitDrop.addEventListener('drop', e => { const file = e.dataTransfer.files[0]; if (file) setFitFile(file); });
+
+const verifyBox = document.getElementById('verifyBox');
+
+function describeCheck(v, minSeconds) {
+  if (!v.presses) return { ok: true, text: 'QZ replay: this route never needs an incline change.' };
+  const ok = v.minGap >= minSeconds && !v.multiStep && !v.extra;
+  return {
+    ok,
+    text: ok
+      ? `QZ replay: ${v.presses} single 1% presses; the closest two were ${v.minGap.toFixed(1)} s apart (at ${v.minGapMph} mph).`
+      : `QZ replay found presses only ${v.minGap.toFixed(1)} s apart or unplanned presses — do not use this file, and please report it.`,
+  };
+}
+
+processBtn.addEventListener('click', async () => {
   if (!currentFile) return;
   clearError();
 
   const maxSpeedMph = parseFloat(document.getElementById('maxSpeed').value) || 12;
   const minSeconds = parseFloat(document.getElementById('minSeconds').value) || 5;
-  const minIncline = parseFloat(document.getElementById('minIncline').value) || 0;
-  const maxIncline = parseFloat(document.getElementById('maxIncline').value) || 15;
+  const minInclineIn = parseFloat(document.getElementById('minIncline').value);
+  const maxInclineIn = parseFloat(document.getElementById('maxIncline').value);
+  const startInclineIn = parseFloat(document.getElementById('startIncline').value);
   const splitMiles = parseFloat(document.getElementById('splitMiles').value) || 0;
+
+  const minIncline = isNaN(minInclineIn) ? 0 : minInclineIn;
+  const maxIncline = isNaN(maxInclineIn) ? 15 : maxInclineIn;
+  const startIncline = Math.min(15, Math.max(0, Math.round(isNaN(startInclineIn) ? 0 : startInclineIn)));
 
   if (maxSpeedMph <= 0 || minSeconds <= 0) {
     showError('Max speed and min seconds must both be positive numbers.');
     return;
   }
+  if (Math.max(0, Math.ceil(minIncline)) > Math.min(15, Math.floor(maxIncline))) {
+    showError('Min incline must be at or below max incline (the Sole F80 range is 0–15%).');
+    return;
+  }
 
   const maxSpeedMps = maxSpeedMph * 1609.344 / 3600;
-  const metersPerPercent = minSeconds * maxSpeedMps;
-  const resampleStep = Math.min(10, Math.max(2, metersPerPercent / 4));
-  const smoothWindowMeters = metersPerPercent * 2;
-  const stepSize = 1; // whole-percent steps, matching the treadmill's own increment
+  // QZ only checks your position once a second and the Sole driver acts every 0.3 s, so a press can land
+  // up to ~1.3 s after its row boundary (~2.6 s for the first press after a direction flip). The spacing
+  // below adds that slack so the real gap between presses is never under minSeconds at max speed.
+  const holdRows = Math.max(1, Math.ceil((minSeconds + 1.5) * maxSpeedMps / ROW_M));
+  const holdRowsAfterReversal = Math.max(1, Math.ceil((minSeconds + 2.8) * maxSpeedMps / ROW_M));
+  const opts = { minIncline, maxIncline, startIncline, holdRows, holdRowsAfterReversal };
+  const replaySpeeds = [...new Set([1.5, 3, 5, maxSpeedMph / 2, maxSpeedMph].map(v => Math.round(v * 10) / 10))].filter(v => v > 0);
 
-  const reader = new FileReader();
-  reader.onload = () => {
-    try {
-      revokeActiveUrls();
-      const points = loadPoints(reader.result);
-      const { outPoints, breakpoints, total, commanded } =
-        buildInclineProfile(points, resampleStep, metersPerPercent, minIncline, maxIncline, smoothWindowMeters, stepSize);
-      const baseName = currentFile.name.replace(/\.gpx$/i, '');
-      const xml = buildGpxXml(outPoints, 'Incline-adjusted route');
+  processBtn.disabled = true;
+  const btnLabel = processBtn.textContent;
+  processBtn.textContent = 'Building and checking against QZ at every speed…';
+  await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
 
-      document.getElementById('statRate').textContent = '1% / ' + metersPerPercent.toFixed(1) + 'm';
-      document.getElementById('statDistance').textContent = (total / 1609.344).toFixed(2) + ' mi';
-      document.getElementById('statPoints').textContent = points.length;
-      document.getElementById('statRange').textContent = commanded.length
-        ? Math.min(...commanded).toFixed(0) + '% – ' + Math.max(...commanded).toFixed(0) + '%'
-        : '–';
+  try {
+    revokeActiveUrls();
+    const gpxText = await readFileAsText(currentFile);
+    let points = loadPoints(gpxText);
 
-      const blob = new Blob([xml], { type: 'application/gpx+xml' });
-      const url = URL.createObjectURL(blob);
-      activeUrls.push(url);
-      const outName = baseName + '_incline.gpx';
-      downloadLink.href = url;
-      downloadLink.download = outName;
-      downloadLink.textContent = 'Download ' + outName;
+    let resumeInfo = null;
+    if (currentFitFile) {
+      const fitBuffer = await readFileAsArrayBuffer(currentFitFile);
+      const { distanceMeters, source } = parseFitDistanceMeters(fitBuffer);
+      const cum = buildCumulativeDistance(points);
+      const total = cum[cum.length - 1];
+      const shiftMode = document.getElementById('shiftMode').checked;
 
-      if (splitMiles > 0) {
-        const numPartsPreview = Math.ceil(total / (splitMiles * 1609.344));
-        if (numPartsPreview > 500) {
-          throw new Error(`That split length would create ${numPartsPreview} files — pick a larger value.`);
-        }
-        const parts = splitIntoParts(outPoints, breakpoints, total, splitMiles);
-        const zipFiles = [];
-        splitList.innerHTML = '';
-        for (const part of parts) {
-          const partXml = buildGpxXml(part.points, `Incline-adjusted route – Part ${part.index} of ${part.total}`);
-          const partName = `${baseName}_incline_part${part.index}of${part.total}.gpx`;
-          const partBytes = new TextEncoder().encode(partXml);
-          zipFiles.push({ name: partName, data: partBytes });
-
-          const partBlob = new Blob([partXml], { type: 'application/gpx+xml' });
-          const partUrl = URL.createObjectURL(partBlob);
-          activeUrls.push(partUrl);
-          const range = `${part.startMiles.toFixed(1)}–${part.endMiles.toFixed(1)} mi`;
-          const inclineRange = part.grades.length
-            ? `${Math.min(...part.grades).toFixed(0)}%–${Math.max(...part.grades).toFixed(0)}%`
-            : '–';
-
-          const row = document.createElement('div');
-          row.className = 'split-row';
-          row.innerHTML = `
-            <div class="info">
-              <div class="range">Part ${part.index} of ${part.total} — ${range}</div>
-              <div class="meta">${inclineRange} incline</div>
-            </div>
-          `;
-          const a = document.createElement('a');
-          a.className = 'download-small';
-          a.href = partUrl;
-          a.download = partName;
-          a.textContent = 'Download';
-          row.appendChild(a);
-          splitList.appendChild(row);
-        }
-
-        const zipBlob = buildZipBlob(zipFiles);
-        const zipUrl = URL.createObjectURL(zipBlob);
-        activeUrls.push(zipUrl);
-        downloadZipLink.href = zipUrl;
-        downloadZipLink.download = `${baseName}_incline_parts.zip`;
-        downloadZipLink.textContent = `Download all ${parts.length} parts as ZIP`;
-
-        splitSection.hidden = false;
-      } else {
-        splitSection.hidden = true;
+      if (!shiftMode && distanceMeters >= total - 1) {
+        throw new Error(`The FIT file shows ${(distanceMeters / 1609.344).toFixed(2)} mi covered, which is at or past the end of this route (${(total / 1609.344).toFixed(2)} mi total) — nothing left to resume.`);
       }
 
-      resultsEl.style.display = 'block';
-    } catch (err) {
-      showError(err.message || String(err));
+      const resumeDist = Math.max(0, Math.min(distanceMeters, total));
+      const resumePoint = interpolateAt(points, cum, resumeDist);
+      const resumeCopy = () => ({ lat: resumePoint.lat, lon: resumePoint.lon, ele: resumePoint.ele });
+
+      if (shiftMode) {
+        const firstPoint = points[0], lastPoint = points[points.length - 1];
+        const loopGapMeters = qtDistance(firstPoint.lat, firstPoint.lon, lastPoint.lat, lastPoint.lon);
+        const partA = points.filter((_, i) => cum[i] > resumeDist);
+        const partB = points.filter((_, i) => cum[i] <= resumeDist);
+        points = [resumeCopy(), ...partA, ...partB, resumeCopy()];
+        resumeInfo = { distanceMeters: resumeDist, source, totalBefore: total, mode: 'shift', loopGapMeters };
+      } else {
+        const trimmed = [resumeCopy()];
+        for (let i = 0; i < points.length; i++) if (cum[i] > resumeDist) trimmed.push(points[i]);
+        points = trimmed;
+        resumeInfo = { distanceMeters: resumeDist, source, totalBefore: total, mode: 'trim' };
+      }
     }
-  };
-  reader.onerror = () => showError('Could not read that file.');
-  reader.readAsText(currentFile);
+
+    const route = makeRoute(points);
+    const total = route.total;
+    if (total <= 0) throw new Error('Track has zero horizontal distance.');
+
+    const baseName = currentFile.name.replace(/\.gpx$/i, '') +
+      (resumeInfo ? (resumeInfo.mode === 'shift' ? '_shift' : '_resume') + (resumeInfo.distanceMeters / 1609.344).toFixed(1) + 'mi' : '');
+
+    const whole = buildComb(route, 0, total, opts);
+    const xml = buildGpxXml(whole.outPoints, 'Incline-adjusted route');
+    const tableSpeeds = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+    const allSpeeds = [...new Set([...tableSpeeds, ...replaySpeeds])].sort((a, b) => a - b);
+    const wholeReplay = verifyXml(xml, allSpeeds, startIncline, whole.totalChanges, minSeconds);
+    const wholeCheck = checkUpTo(wholeReplay, maxSpeedMph);
+    const tableRows = wholeReplay.perSpeed.filter(s => tableSpeeds.includes(s.mph) || Math.abs(s.mph - maxSpeedMph) < 1e-9);
+
+    if (resumeInfo) {
+      if (resumeInfo.mode === 'shift') {
+        let note = `Shifted the start to ${(resumeInfo.distanceMeters / 1609.344).toFixed(2)} mi (from the FIT file's ${resumeInfo.source}) — full ${(resumeInfo.totalBefore / 1609.344).toFixed(2)} mi route kept, wrapping around through the original start back to this point.`;
+        if (resumeInfo.loopGapMeters > 100) {
+          note += ` Note: the route's original start and end are ${resumeInfo.loopGapMeters.toFixed(0)}m apart, so there'll be a jump where it wraps around — this works best for routes that actually loop back near their start.`;
+        }
+        resumeNoteEl.textContent = note;
+      } else {
+        resumeNoteEl.textContent = `Resumed from ${(resumeInfo.distanceMeters / 1609.344).toFixed(2)} mi (from the FIT file's ${resumeInfo.source}) — ${(resumeInfo.totalBefore / 1609.344).toFixed(2)} mi trimmed down to ${(total / 1609.344).toFixed(2)} mi remaining.`;
+      }
+      resumeNoteEl.hidden = false;
+    } else {
+      resumeNoteEl.hidden = true;
+    }
+
+    document.getElementById('statRate').textContent = (holdRows * ROW_M / maxSpeedMps).toFixed(1) + ' s';
+    document.getElementById('statDistance').textContent = (total / 1609.344).toFixed(2) + ' mi';
+    document.getElementById('statPoints').textContent = whole.changes;
+    document.getElementById('statRange').textContent = whole.minLevel + '% – ' + whole.maxLevel + '%';
+
+    renderSpeedTable(tableRows, maxSpeedMph, minSeconds);
+    const wc = describeCheck(wholeCheck, minSeconds);
+    verifyBox.textContent = wc.text;
+    verifyBox.className = 'verify ' + (wc.ok ? 'ok' : 'bad');
+    verifyBox.hidden = false;
+
+    const blob = new Blob([xml], { type: 'application/gpx+xml' });
+    const url = URL.createObjectURL(blob);
+    activeUrls.push(url);
+    const outName = baseName + '_incline.gpx';
+    downloadLink.href = url;
+    downloadLink.download = outName;
+    downloadLink.textContent = 'Download ' + outName;
+
+    if (splitMiles > 0) {
+      const splitLenM = splitMiles * 1609.344;
+      const numParts = Math.max(1, Math.ceil(total / splitLenM));
+      if (numParts > 500) throw new Error(`That split length would create ${numParts} files — pick a larger value.`);
+      const zipFiles = [];
+      splitList.innerHTML = '';
+      for (let k = 0; k < numParts; k++) {
+        const s0 = k * splitLenM, s1 = Math.min((k + 1) * splitLenM, total);
+        const part = buildComb(route, s0, s1, opts);
+        const partXml = buildGpxXml(part.outPoints, `Incline-adjusted route – Part ${k + 1} of ${numParts}`);
+        const partCheck = describeCheck(checkUpTo(verifyXml(partXml, replaySpeeds, startIncline, part.totalChanges, minSeconds), maxSpeedMph), minSeconds);
+        const partName = `${baseName}_incline_part${k + 1}of${numParts}.gpx`;
+        zipFiles.push({ name: partName, data: new TextEncoder().encode(partXml) });
+
+        const partUrl = URL.createObjectURL(new Blob([partXml], { type: 'application/gpx+xml' }));
+        activeUrls.push(partUrl);
+
+        const row = document.createElement('div');
+        row.className = 'split-row';
+        const info = document.createElement('div');
+        info.className = 'info';
+        const range = document.createElement('div');
+        range.className = 'range';
+        range.textContent = `Part ${k + 1} of ${numParts} — ${(s0 / 1609.344).toFixed(1)}–${(s1 / 1609.344).toFixed(1)} mi`;
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        meta.textContent = `${part.minLevel}%–${part.maxLevel}% incline`;
+        const check = document.createElement('div');
+        check.className = 'check' + (partCheck.ok ? '' : ' bad');
+        check.textContent = partCheck.ok ? 'Passed QZ replay' : partCheck.text;
+        info.append(range, meta, check);
+        const a = document.createElement('a');
+        a.className = 'download-small';
+        a.href = partUrl;
+        a.download = partName;
+        a.textContent = 'Download';
+        row.append(info, a);
+        splitList.appendChild(row);
+      }
+
+      const zipUrl = URL.createObjectURL(buildZipBlob(zipFiles));
+      activeUrls.push(zipUrl);
+      downloadZipLink.href = zipUrl;
+      downloadZipLink.download = `${baseName}_incline_parts.zip`;
+      downloadZipLink.textContent = `Download all ${numParts} parts as ZIP`;
+      splitSection.hidden = false;
+    } else {
+      splitSection.hidden = true;
+    }
+
+    resultsEl.style.display = 'block';
+  } catch (err) {
+    showError(err.message || String(err));
+  } finally {
+    processBtn.disabled = false;
+    processBtn.textContent = btnLabel;
+  }
 });
 </script>
 </body>
