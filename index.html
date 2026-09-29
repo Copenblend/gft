@@ -208,6 +208,27 @@
   .speed-table tr.over td:first-child::after { content: ' (above your max)'; color: var(--muted); font-size: .75rem; }
   .speed-table tr.mine td { font-weight: 600; }
 
+  [hidden] { display: none !important; }
+  .tabs {
+    display: flex;
+    gap: 4px;
+    margin: -24px 0 32px;
+    border-bottom: 1px solid var(--border);
+  }
+  .tabs a {
+    padding: 10px 14px;
+    color: var(--muted);
+    text-decoration: none;
+    font-size: .9rem;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+  }
+  .tabs a:hover { color: var(--text); }
+  .tabs a[aria-current="page"] { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+  .tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .cad-compare { font-variant-numeric: tabular-nums; }
+  .cad-compare .was { color: var(--muted); text-decoration: line-through; font-weight: 400; font-size: 1.1rem; margin-right: 6px; }
+
   footer {
     margin-top: 40px;
     color: var(--muted);
@@ -217,6 +238,12 @@
 </head>
 <body>
 <div class="wrap">
+  <nav class="tabs" aria-label="Tools">
+    <a href="#/gpx" data-route="gpx">GPX Incline</a>
+    <a href="#/fit-cadence" data-route="fit-cadence">FIT Cadence Fix</a>
+  </nav>
+
+  <section id="view-gpx" data-view="gpx">
   <h1>GPX Incline Adjuster</h1>
   <p class="lede">Rebuilds a GPX so QZ can only move your treadmill one whole percent at a time, never sooner than your "min seconds" apart at your max speed (slower running only spaces them further). A full 0→15% climb takes about 90 s at 12 mph. Descents flatten to 0%, climbs cap at your max, and every file starts from your treadmill's resting incline. Each file is replayed through a copy of QZ's own incline logic before you download it.</p>
 
@@ -298,6 +325,37 @@
       <div class="split-list" id="splitList"></div>
     </div>
   </div>
+
+  </section>
+
+  <section id="view-fit-cadence" data-view="fit-cadence" hidden>
+  <h1>FIT Cadence Fix</h1>
+  <p class="lede">QZ saves a run's average and max cadence at twice the scale of its second-by-second cadence, so Garmin Connect shows them doubled (282 instead of 141). This halves only those summary numbers. Every other value in the file stays exactly as QZ wrote it.</p>
+
+  <div class="drop" id="cadDrop" tabindex="0" role="button" aria-label="Choose a FIT file to fix">
+    <p class="main">Drop a QZ .fit file here, or click to choose one</p>
+    <p class="sub">Nothing leaves your browser — the file is fixed locally.</p>
+    <div class="filename" id="cadFilename"></div>
+    <input type="file" id="cadInput" accept=".fit">
+  </div>
+  <label class="checkbox-row">
+    <input type="checkbox" id="cadForce">
+    Halve the summary even if it doesn't look doubled
+  </label>
+  <div class="error" id="cadError" hidden></div>
+
+  <div class="panel" id="cadResults" hidden>
+    <h2>Result</h2>
+    <div class="stat-row">
+      <div class="stat"><div class="num cad-compare" id="cadStatAvg">–</div><div class="label">average cadence in Connect (spm)</div></div>
+      <div class="stat"><div class="num cad-compare" id="cadStatMax">–</div><div class="label">max cadence in Connect (spm)</div></div>
+      <div class="stat"><div class="num" id="cadStatRec">–</div><div class="label">average of the second-by-second cadence (spm, unchanged)</div></div>
+      <div class="stat"><div class="num" id="cadStatFields">–</div><div class="label">summary values changed (session and laps)</div></div>
+    </div>
+    <div class="verify" id="cadVerify" hidden></div>
+    <a class="download" id="cadDownload" hidden>Download fixed FIT</a>
+  </div>
+  </section>
 
   <footer>Runs entirely in this page — no upload, no install, no account.</footer>
 </div>
@@ -1101,6 +1159,199 @@ processBtn.addEventListener('click', async () => {
     processBtn.textContent = btnLabel;
   }
 });
+// ============================================================
+// QZ cadence fixer: halves session/lap avg + max running cadence
+// so they match the per-second records (Garmin doubles both).
+// ============================================================
+function fitCrc16(bytes, end) {
+  const t = [0x0000,0xCC01,0xD801,0x1400,0xF001,0x3C00,0x2800,0xE401,0xA001,0x6C00,0x7800,0xB401,0x5000,0x9C01,0x8801,0x4400];
+  let crc = 0;
+  for (let i = 0; i < end; i++) {
+    const b = bytes[i];
+    let tmp = t[crc & 0xF]; crc = (crc >> 4) & 0x0FFF; crc = crc ^ tmp ^ t[b & 0xF];
+    tmp = t[crc & 0xF]; crc = (crc >> 4) & 0x0FFF; crc = crc ^ tmp ^ t[(b >> 4) & 0xF];
+  }
+  return crc;
+}
+
+// Session (18): avg_cadence=18, max_cadence=19. Lap (19): avg_cadence=17, max_cadence=18. Record (20): cadence=4.
+const CADENCE_SUMMARY_FIELDS = { 18: { 18: 'avg', 19: 'max' }, 19: { 17: 'avg', 18: 'max' } };
+
+function scanFitCadence(arrayBuffer) {
+  const bytes = new Uint8Array(arrayBuffer);
+  const view = new DataView(arrayBuffer);
+  const len = bytes.length;
+  if (len < 14) throw new Error('That file is too small to be a valid FIT file.');
+  const headerSize = bytes[0];
+  const sig = String.fromCharCode(bytes[8], bytes[9], bytes[10], bytes[11]);
+  if (sig !== '.FIT') throw new Error('That does not look like a valid FIT file.');
+  const dataSize = view.getUint32(4, true);
+  const dataEnd = Math.min(headerSize + dataSize, len - 2);
+
+  const defs = {};
+  const summary = []; // { offset, msg, kind, value }
+  let recSum = 0, recCount = 0;
+  let sport = null;
+  let pos = headerSize;
+  while (pos < dataEnd) {
+    const header = bytes[pos++];
+    const compressed = (header & 0x80) !== 0;
+    const isDef = !compressed && (header & 0x40) !== 0;
+    const local = compressed ? ((header >> 5) & 0x3) : (header & 0x0F);
+    if (isDef) {
+      pos += 1;
+      const le = bytes[pos++] === 0;
+      const gm = view.getUint16(pos, le); pos += 2;
+      const n = bytes[pos++];
+      const fields = [];
+      for (let i = 0; i < n; i++) { fields.push({ num: bytes[pos], size: bytes[pos + 1] }); pos += 3; }
+      let dev = 0;
+      if (header & 0x20) {
+        const nd = bytes[pos++];
+        for (let i = 0; i < nd; i++) { dev += bytes[pos + 1]; pos += 3; }
+      }
+      defs[local] = { gm, fields, dev };
+    } else {
+      const d = defs[local];
+      if (!d) throw new Error('That FIT file looks malformed (data before its definition).');
+      let p = pos;
+      const map = CADENCE_SUMMARY_FIELDS[d.gm];
+      for (const f of d.fields) {
+        if (f.size === 1) {
+          const v = bytes[p];
+          if (map && map[f.num] && v !== 0xFF) summary.push({ offset: p, msg: d.gm === 18 ? 'session' : 'lap', kind: map[f.num], value: v });
+          else if (d.gm === 20 && f.num === 4 && v !== 0xFF) { recSum += v; recCount++; }
+          else if (d.gm === 18 && f.num === 5 && v !== 0xFF) sport = v;
+        }
+        p += f.size;
+      }
+      pos = p + d.dev;
+    }
+  }
+  const sessionAvg = summary.find(s => s.msg === 'session' && s.kind === 'avg');
+  const sessionMax = summary.find(s => s.msg === 'session' && s.kind === 'max');
+  return {
+    bytes, summary, sport,
+    recordMean: recCount ? recSum / recCount : null,
+    recordCount: recCount,
+    sessionAvg: sessionAvg ? sessionAvg.value : null,
+    sessionMax: sessionMax ? sessionMax.value : null,
+  };
+}
+
+function fixFitCadence(scan) {
+  const out = new Uint8Array(scan.bytes); // copy
+  for (const s of scan.summary) out[s.offset] = Math.round(s.value / 2);
+  const crc = fitCrc16(out, out.length - 2);
+  out[out.length - 2] = crc & 0xFF;
+  out[out.length - 1] = (crc >> 8) & 0xFF;
+  return out;
+}
+
+const cadDrop = document.getElementById('cadDrop');
+const cadInput = document.getElementById('cadInput');
+const cadFilename = document.getElementById('cadFilename');
+const cadForce = document.getElementById('cadForce');
+const cadError = document.getElementById('cadError');
+const cadResults = document.getElementById('cadResults');
+const cadVerify = document.getElementById('cadVerify');
+const cadDownload = document.getElementById('cadDownload');
+let cadFile = null;
+let cadUrl = null;
+
+function cadCompare(el, before, after, changed) {
+  el.textContent = '';
+  if (before == null) { el.textContent = 'not in file'; return; }
+  if (changed) {
+    const was = document.createElement('span');
+    was.className = 'was';
+    was.textContent = before * 2;
+    el.append(was, String(after * 2));
+  } else {
+    el.textContent = before * 2;
+  }
+}
+
+async function runCadenceFix() {
+  if (!cadFile) return;
+  cadError.hidden = true;
+  cadResults.hidden = true;
+  cadDownload.hidden = true;
+  if (cadUrl) { URL.revokeObjectURL(cadUrl); cadUrl = null; }
+  try {
+    const buf = await readFileAsArrayBuffer(cadFile);
+    const scan = scanFitCadence(buf);
+    if (!scan.summary.length) throw new Error('This file has no average or max cadence in its summary, so there is nothing to fix.');
+    if (scan.recordMean == null) throw new Error('This file has no second-by-second cadence to compare the summary against.');
+
+    const ratio = scan.sessionAvg != null ? scan.sessionAvg / scan.recordMean : null;
+    const doubled = ratio != null && ratio >= 1.6 && ratio <= 2.4;
+    const apply = doubled || cadForce.checked;
+
+    const half = v => (v == null ? null : Math.round(v / 2));
+    cadCompare(document.getElementById('cadStatAvg'), scan.sessionAvg, half(scan.sessionAvg), apply);
+    cadCompare(document.getElementById('cadStatMax'), scan.sessionMax, half(scan.sessionMax), apply);
+    document.getElementById('cadStatRec').textContent = Math.round(scan.recordMean * 2);
+    document.getElementById('cadStatFields').textContent = apply ? scan.summary.length : 0;
+
+    if (apply) {
+      const fixed = fixFitCadence(scan);
+      const check = scanFitCadence(fixed.buffer);
+      const crcOk = fitCrc16(fixed, fixed.length - 2) === (fixed[fixed.length - 2] | (fixed[fixed.length - 1] << 8));
+      const newRatio = check.sessionAvg / check.recordMean;
+      cadVerify.className = 'verify ' + (crcOk ? 'ok' : 'bad');
+      cadVerify.textContent = !crcOk
+        ? 'The fixed file failed its checksum. Don\u2019t upload it.'
+        : doubled
+          ? `Summary now matches the second-by-second cadence (${newRatio.toFixed(2)}\u00d7). Checksum updated; ${check.recordCount} records untouched.`
+          : `Halved on request. The summary was ${ratio ? ratio.toFixed(2) : '?'}\u00d7 the second-by-second cadence before, ${newRatio.toFixed(2)}\u00d7 now.`;
+      cadUrl = URL.createObjectURL(new Blob([fixed], { type: 'application/octet-stream' }));
+      cadDownload.href = cadUrl;
+      cadDownload.download = cadFile.name.replace(/\.fit$/i, '') + '_fixed.fit';
+      cadDownload.hidden = !crcOk;
+    } else {
+      cadVerify.className = 'verify ok';
+      cadVerify.textContent = `This summary already matches the second-by-second cadence (${ratio ? ratio.toFixed(2) : '?'}\u00d7), so Connect should show it correctly. Nothing to fix — tick the box above to halve it anyway.`;
+    }
+    cadVerify.hidden = false;
+    cadResults.hidden = false;
+  } catch (err) {
+    cadError.textContent = err.message || String(err);
+    cadError.hidden = false;
+  }
+}
+
+function setCadFile(file) {
+  if (!/\.fit$/i.test(file.name)) { cadError.textContent = 'Choose a .fit file.'; cadError.hidden = false; return; }
+  cadFile = file;
+  cadFilename.textContent = file.name;
+  runCadenceFix();
+}
+cadDrop.addEventListener('click', () => cadInput.click());
+cadDrop.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); cadInput.click(); } });
+cadInput.addEventListener('change', () => { if (cadInput.files[0]) setCadFile(cadInput.files[0]); cadInput.value = ''; });
+['dragenter', 'dragover'].forEach(ev => cadDrop.addEventListener(ev, e => { e.preventDefault(); cadDrop.classList.add('drag'); }));
+['dragleave', 'drop'].forEach(ev => cadDrop.addEventListener(ev, e => { e.preventDefault(); cadDrop.classList.remove('drag'); }));
+cadDrop.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) setCadFile(f); });
+cadForce.addEventListener('change', runCadenceFix);
+
+// ============================================================
+// Hash router — each tool is its own view; back/forward work
+// ============================================================
+const ROUTES = { 'gpx': 'GPX Incline Adjuster', 'fit-cadence': 'FIT Cadence Fix' };
+function route() {
+  let name = location.hash.replace(/^#\/?/, '');
+  if (!ROUTES[name]) name = 'gpx';
+  document.querySelectorAll('[data-view]').forEach(v => { v.hidden = v.dataset.view !== name; });
+  document.querySelectorAll('.tabs a').forEach(a => {
+    if (a.dataset.route === name) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
+  });
+  document.title = ROUTES[name];
+  window.scrollTo(0, 0);
+}
+window.addEventListener('hashchange', route);
+route();
 </script>
 </body>
 </html>
